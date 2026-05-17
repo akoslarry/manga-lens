@@ -1,284 +1,352 @@
-# 📚 MangaLens - 漫画实时翻译器
+# MangaLens - 漫画实时翻译器
 
-> 让阅读生肉漫画不再是障碍，实时识别并翻译日文文字
+> 一款 Chrome 浏览器扩展，实时识别并翻译漫画图片中的日文文字
 
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Chrome](https://img.shields.io/badge/Chrome-Extension-green.svg)](https://chrome.google.com/webstore)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.0-blue.svg)](https://www.typescriptlang.org/)
-[![Vite](https://img.shields.io/badge/Vite-5.0-brightgreen.svg)](https://vitejs.dev/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Chrome Web Store](https://img.shields.io/badge/Chrome-Extension-green)](https://chrome.google.com/webstore)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.0-blue)](https://www.typescriptlang.org/)
+[![Vite](https://img.shields.io/badge/Vite-5.0-brightgreen)](https://vitejs.dev/)
 
-## 🎯 项目简介
+---
 
-MangaLens 是一款 Chrome 浏览器扩展程序，能够实时识别网页漫画中的日文文字，并将其翻译成中文，让用户无需任何日语基础就能享受原版漫画。
+## 功能特性
 
-### 核心特性
+### 核心功能
 
-- 📖 **实时翻译** - 自动检测并翻译漫画图片中的日文
-- 🎨 **原位覆盖** - 翻译文字覆盖在原位置，不影响阅读体验
-- 🔒 **隐私保护** - API 密钥存储在本地，不上传服务器
-- ⚡ **智能合并** - 对话片段自动合并为完整句子
-- 📱 **响应式支持** - 支持滚动翻页、懒加载等动态内容
-- 🌐 **多网站支持** - 支持 Pixiv、漫画王等主流漫画网站
+| 功能 | 说明 |
+|------|------|
+| **多引擎 OCR** | 支持腾讯云 OCR（通用印刷体/高精度版）和 Hugging Face 本地模型（PaddleOCR） |
+| **智能翻译** | 支持 MiniMax API 翻译，可选本地机器翻译引擎 |
+| **并发控制** | OCR 队列（3并发）+ 翻译队列（5并发），避免 API 限流 |
+| **对话合并** | X轴分组 + Y轴排序算法，合并分散的对话片段 |
+| **多网站支持** | 自动适配 Pixiv FANBOX、Pixiv、漫画王等网站 |
+| **防盗链处理** | 自动处理 Referer 和 Cookie，解决图片 403 问题 |
 
-## 🛠️ 技术栈
+### 支持的网站
+
+| 网站 | 域名 | 图片获取方式 |
+|------|------|-------------|
+| Pixiv FANBOX | `*.fanbox.cc` | Cookie + Referer |
+| Pixiv | `*.pixiv.net` | Cookie + Referer |
+| 漫画王 | `*.mangaouchiyugo.com` | Referer |
+| 其他网站 | 通用 | 自动检测 Referer |
+
+---
+
+## 技术架构
+
+### 架构图
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         Chrome Extension                         │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌──────────────┐      ┌───────────────────┐                   │
+│  │  popup.html  │ ←──→ │  content-script   │                   │
+│  │   (Vue UI)   │      │    (主脚本)        │                   │
+│  └──────────────┘      └─────────┬─────────┘                   │
+│                                  │                              │
+│                         chrome.runtime.sendMessage               │
+│                                  │                              │
+│                         ┌─────────▼─────────┐                   │
+│                         │    background.js  │                   │
+│                         │   (Service Worker) │                  │
+│                         └─────────┬─────────┘                   │
+│                                   │                              │
+│                    ┌──────────────┼──────────────┐              │
+│                    │              │              │              │
+│              ┌─────▼─────┐ ┌──────▼─────┐ ┌─────▼─────┐        │
+│              │ 图片获取  │ │ 腾讯云 OCR  │ │ MiniMax   │        │
+│              │(防盗链)   │ │  (Base64)  │ │ 翻译 API  │        │
+│              └───────────┘ └────────────┘ └───────────┘        │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 技术栈
 
 | 类别 | 技术 |
 |------|------|
-| **OCR 引擎** | 腾讯云 OCR (GeneralAccurateOCR + MulOCR) |
-| **翻译 API** | MiniMax M2 模型 |
-| **扩展框架** | Chrome Extension (Manifest V3) |
-| **构建工具** | Vite + TypeScript |
-| **签名算法** | TC3-HMAC-SHA256 (腾讯云) |
+| 扩展框架 | Chrome Extension Manifest V3 |
+| 构建工具 | Vite 5 + TypeScript 5 |
+| UI 框架 | Vue 3 |
+| 签名算法 | TC3-HMAC-SHA256 (腾讯云) |
+| 加密库 | CryptoJS |
+| OCR 引擎 | 腾讯云 OCR API / PaddleOCR (本地) |
 
-## 🚀 快速开始
+---
+
+## 安装部署
 
 ### 前置要求
 
 - Node.js 18+
 - npm 或 yarn
-- 腾讯云账号（获取 OCR API 密钥）
-- MiniMax 账号（获取翻译 API 密钥）
+- Chrome 浏览器
 
 ### 安装步骤
 
-1. **克隆项目**
 ```bash
+# 1. 克隆项目
 git clone https://github.com/akoslarry/manga-lens.git
 cd manga-lens
-```
 
-2. **安装依赖**
-```bash
+# 2. 安装依赖
 npm install
+
+# 3. 构建扩展
+npm run build
+
+# 4. 加载扩展
+#    - 打开 Chrome，访问 chrome://extensions/
+#    - 开启"开发者模式"
+#    - 点击"加载已解压的扩展程序"
+#    - 选择项目中的 dist/ 目录
 ```
 
-3. **配置 API 密钥**
+### 开发模式
 
-打开扩展 popup 界面（点击扩展图标），在设置页面填入：
-- **MiniMax API Key**: 翻译用
-- **腾讯云 SecretId/SecretKey**: OCR 识别用
+```bash
+npm run dev     # 启动开发服务器（热重载）
+npm run build   # 构建生产版本
+```
 
-4. **加载扩展**
-   - 打开 Chrome，访问 `chrome://extensions/`
-   - 开启"开发者模式"
-   - 点击"加载已解压的扩展程序"
-   - 选择项目中的 `dist/` 目录
+---
 
-5. **开始使用**
-   - 访问漫画网站
-   - 点击扩展图标
-   - 开启翻译开关
+## 配置说明
 
-## 🔑 API 密钥获取
+### 扩展配置项
 
-### MiniMax 翻译 API
+打开扩展 popup 界面（点击扩展图标），配置以下选项：
+
+| 配置项 | 说明 | 必填 |
+|--------|------|------|
+| **翻译开关** | 开启/关闭翻译功能 | 是 |
+| **腾讯云 SecretId** | OCR API 身份标识 | 是 |
+| **腾讯云 SecretKey** | OCR API 密钥 | 是 |
+| **MiniMax API Key** | 翻译 API 密钥 | 是 |
+| **OCR 模式** | 云函数 / 直接 API / 本地模型 | 是 |
+| **腾讯云地域** | 如 ap-guangzhou | 是 |
+
+### API 密钥获取
+
+#### 腾讯云 OCR
+
+1. 访问 [腾讯云控制台](https://console.cloud.tencent.com/cam/capi)
+2. 创建访问密钥，获取 SecretId 和 SecretKey
+3. 开通 [通用印刷体识别](https://console.cloud.tencent.com/ocr/overview) 服务
+
+#### MiniMax 翻译
 
 1. 访问 [MiniMax 控制台](https://www.minimaxi.com/user-center/basic-information/interface-key)
 2. 创建 API Key
-3. 在扩展设置中填入
 
-### 腾讯云 OCR API
+---
 
-1. 访问 [腾讯云控制台](https://console.cloud.tencent.com/cam/capi)
-2. 创建访问密钥（SecretId + SecretKey）
-3. 开通 OCR 服务（通用印刷体识别/高精度版）
-4. 在扩展设置中填入
-
-## 📁 项目结构
+## 项目结构
 
 ```
 manga-lens/
-├── dist/                        # 构建输出（Chrome 扩展加载此目录）
+├── dist/                         # 构建输出目录
 │   ├── manifest.json            # 扩展配置
-│   ├── background.js            # 后台脚本（Service Worker）
-│   ├── content-script.js       # 内容脚本（注入到漫画页面）
-│   └── popup.js                 # 弹出窗口脚本
-├── src/                         # 源代码目录
-│   ├── content-script.ts        # 内容脚本入口
-│   ├── background.ts            # 后台脚本（API 中转）
-│   ├── modules/
-│   │   ├── ocr-engine.ts        # OCR 引擎 + 锚点机制
-│   │   ├── dialog-merger.ts    # 对话合并算法
-│   │   ├── translation-overlay.ts  # 翻译覆盖层渲染
-│   │   ├── batch-translator.ts # 批量翻译（单图单次）
-│   │   └── tencent-cloud-ocr-direct.ts  # 腾讯云 OCR 直连
-│   └── popup/
-│       └── index.html           # Popup 界面
-├── cloud-functions/            # 云函数代码（可选）
-│   └── tencent-ocr/            # OCR 云函数
-├── package.json
-├── tsconfig.json
-├── vite.config.ts
-└── README.md
+│   ├── background.js            # 后台脚本
+│   ├── content-script.js        # 内容脚本
+│   ├── popup.html               # 弹出窗口
+│   ├── popup.js                 # Popup 逻辑
+│   └── content-styles.css       # 内容样式
+│
+├── public/                       # 静态资源
+│   ├── manifest.json            # 扩展配置
+│   ├── popup.html               # Popup HTML
+│   └── content-styles.css       # 内容页样式
+│
+├── src/                          # 源代码
+│   ├── content-script.ts         # 内容脚本入口
+│   ├── background.ts             # 后台脚本（API 中转）
+│   │
+│   └── modules/                  # 功能模块
+│       ├── ocr-engine.ts         # OCR 引擎 + 锚点机制
+│       ├── translator.ts         # 翻译模块（MiniMax）
+│       ├── local-translator.ts   # 本地翻译（可选）
+│       ├── translation-overlay.ts # 翻译覆盖层渲染
+│       ├── dialog-merger.ts      # 对话合并算法
+│       ├── batch-translator.ts   # 批量翻译
+│       ├── image-detector.ts     # 图片检测
+│       ├── cloud-ocr-client.ts   # 云函数 OCR 客户端
+│       └── tencent-cloud-ocr-direct.ts # 腾讯云 OCR 直连
+│
+├── cloud-functions/              # 云函数代码
+│   └── tencent-ocr/             # 腾讯云 OCR 云函数
+│
+├── package.json                  # 项目配置
+├── vite.config.ts               # Vite 配置
+├── tsconfig.json                 # TypeScript 配置
+└── README.md                    # 本文件
 ```
 
-## 🎮 使用说明
+---
 
-### 支持的网站
+## 核心模块说明
 
-| 网站 | 网址 | 支持状态 |
-|------|------|----------|
-| Pixiv FANBOX | fanbox.cc | ✅ 完全支持 |
-| Pixiv | pixiv.net | ✅ 完全支持 |
-| 漫画王 | mangaouchiyugo.com | ✅ 完全支持 |
-| 其他漫画网站 | - | ✅ 通用模式 |
+### 1. content-script.ts - 内容脚本
 
-### 基本操作
+负责漫画页面的图片检测、OCR 排队和翻译渲染。
 
-1. **开启/关闭翻译**
+**核心机制**:
+
+```typescript
+// 并发控制
+const OCR_CONCURRENCY = 3;           // 最多 3 个并发 OCR
+const TRANSLATION_CONCURRENCY = 5;   // 最多 5 个并发翻译
+const TRANSLATION_QUEUE_LIMIT = 10;  // 队列满时暂停 OCR
+```
+
+**消息类型**:
+
+| 消息 | 来源 | 功能 |
+|------|------|------|
+| `TOGGLE_ENABLED` | Popup | 开关翻译 |
+| `CONFIGURE_API` | Popup | 更新 API 配置 |
+| `REFRESH` | Popup | 刷新页面翻译 |
+| `SELECT_IMAGE` | Popup | 手动选择图片 |
+| `GET_STATUS` | Popup | 获取处理状态 |
+
+### 2. background.ts - 后台脚本
+
+作为中转服务，解决 CORS 问题。
+
+**核心功能**:
+
+| 函数 | 功能 |
+|------|------|
+| `fetchImageAsBase64()` | 获取图片并转为 Base64 |
+| `backgroundRecognizeWithTencentCloudAPI_Base64()` | 腾讯云 OCR (Base64 模式) |
+| `backgroundRecognizeWithTencentCloudAPI_ImageUrl()` | 腾讯云 OCR (URL 模式) |
+| `getPixivCookies()` | 获取用户 Pixiv Cookie |
+
+### 3. dialog-merger.ts - 对话合并
+
+将分散的 OCR 结果合并为完整的对话。
+
+```typescript
+// 合并算法
+1. 按 X 坐标分组：气泡 X 坐标差异 < 150px → 同一列
+2. 组内按 Y 坐标排序
+3. 合并判断：Y 轴距离 < 50px → 同一对话
+```
+
+### 4. translation-overlay.ts - 翻译覆盖层
+
+在原图片位置渲染翻译文字。
+
+**渲染选项**:
+
+| 选项 | 说明 |
+|------|------|
+| 字体 | 可选多种字体 |
+| 背景 | 半透明黑色背景 |
+| 描边 | 文字描边防止覆盖 |
+| 字号 | 根据原文长度自动调整 |
+
+### 5. ocr-engine.ts - OCR 引擎
+
+负责 OCR 调用和锚点机制。
+
+**锚点机制**:
+
+```
+在图片顶部/底部添加锚点文本
+<この画像は横です>  ← 诱导 OCR 使用正确方向识别
+                                    ↓
+                            OCR 识别结果
+                                    ↓
+                         过滤掉锚点文本
+```
+
+---
+
+## 使用方法
+
+### 基础操作
+
+1. **开启翻译**
    - 点击扩展图标
-   - 切换右上角开关
+   - 开启右上角开关
+   - 页面自动开始处理漫画图片
 
-2. **配置 API**
+2. **手动选择图片**
    - 点击扩展图标
-   - 在对应标签页填写 API 密钥
-   - 点击"保存配置"
+   - 点击"手动选择图片"按钮
+   - 点击页面上的漫画图片
 
 3. **刷新翻译**
    - 点击"刷新页面翻译"按钮
-   - 扩展会重新检测并翻译页面中的漫画
 
-### 工作原理
+4. **查看状态**
+   - 点击扩展图标
+   - 查看处理进度和统计
 
-```
-漫画页面 → 图片检测 → 添加方向锚点 → OCR 识别
-    ↓
-对话合并（X轴分组 + Y轴排序）→ 批量翻译 → 覆盖层渲染
-```
+### 调试功能
 
-### 核心技术
+打开浏览器控制台 (F12)，可使用：
 
-#### 1. OCR 方向锚点
-
-当漫画中没有横向文本时，OCR 可能错误判断图片方向。解决方案：
-
-- 在发送给 OCR 的图片**顶部和底部**添加 `<この画像は横です>` 锚点文本
-- 诱导 OCR 使用正确方向识别
-- OCR 结果中过滤掉锚点文本
-
-#### 2. 对话合并算法
-
-OCR 识别结果是分散的文字片段，通过以下步骤合并：
-
-1. **X轴分组**: 同一列的气泡 X 坐标差异 < 150px
-2. **Y轴排序**: 组内按 Y 坐标排序
-3. **合并判断**: Y轴距离 < 50px 时合并为同一对话
-
-## 🔧 开发指南
-
-### 本地开发
-
-```bash
-# 安装依赖
-npm install
-
-# 启动开发模式（热重载）
-npm run dev
-
-# 构建生产版本
-npm run build
+```javascript
+window.debugPixivImage()           // 调试 Pixiv 图片请求
+window.testPixivReferer(imageUrl)  // 测试 Referer 头
 ```
 
-### 构建产物说明
+---
 
-| 文件 | 说明 |
-|------|------|
-| `dist/content-script.js` | IIFE 格式，内容脚本 |
-| `dist/background.js` | IIFE 格式，后台脚本 |
-| `dist/popup.js` | IIFE 格式，Popup 脚本 |
+## 常见问题
 
-### 模块说明
+### Q: 图片显示 403 错误？
 
-| 模块 | 职责 |
-|------|------|
-| `ocr-engine.ts` | OCR 识别、锚点添加、TC3 签名 |
-| `dialog-merger.ts` | 对话片段合并算法 |
-| `translation-overlay.ts` | 翻译覆盖层渲染 |
-| `batch-translator.ts` | MiniMax 批量翻译 |
+A: 图片有防盗链保护。扩展会自动处理以下网站的防盗链：
+- Pixiv FANBOX：使用用户 Cookie
+- Pixiv：使用用户 Cookie + 作品页 Referer
 
-## 🤝 贡献指南
+### Q: OCR 识别不准确？
 
-1. Fork 本仓库
-2. 创建特性分支 (`git checkout -b feature/amazing-feature`)
-3. 提交更改 (`git commit -m 'Add amazing feature'`)
-4. 推送到分支 (`git push origin feature/amazing-feature`)
-5. 创建 Pull Request
+A: 检查以下事项：
+- 图片清晰度：建议使用高清漫画源站
+- API 配置：确认腾讯云 OCR 服务已开通
+- 文字方向：锚点机制会自动处理
 
-### 协作文档
+### Q: 翻译很慢？
 
-- [项目概述](PROJECT_OVERVIEW.md) - 详细架构说明
-- [AI Agent 指南](AGENT_GUIDE.md) - 快速理解项目要点
-- [Chrome 扩展开发指南](CHROME-EXTENSION-GUIDE.md)
-
-## ⚠️ 注意事项
-
-1. **API 密钥安全**: 所有 API 密钥存储在 `chrome.storage.local`，不会硬编码到代码
-2. **.gitignore**: 已排除 `node_modules/`、`dist/`、`.env` 等
-3. **CORS 解决**: 所有 API 调用通过 Background Script 中转
-
-## ❓ 常见问题
-
-### Q: 为什么翻译结果不准确？
-A: OCR 识别准确性取决于图片质量。建议使用高清漫画源站。
-
-### Q: 翻译很慢怎么办？
 A: 
 - 检查网络连接
 - 确认 API 配额充足
 - 减少单页漫画数量
 
-### Q: 图片无法识别？
-A: 
-- 确认已填写腾讯云 OCR API 密钥
-- 检查 OCR 服务是否已开通
-- 尝试刷新页面重新检测
-
 ### Q: 如何卸载扩展？
+
 A: 打开 `chrome://extensions/`，找到 MangaLens，点击"移除"。
-
-## 📊 工作流程图
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      用户操作                                │
-│  访问漫画网页 → 点击扩展图标 → 开启翻译开关                   │
-└─────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────┐
-│                    内容脚本 (Content Script)                 │
-│  1. 检测页面中的漫画图片                                      │
-│  2. 添加 OCR 方向锚点                                        │
-│  3. 通过 Background Script 获取图片 Base64                    │
-│  4. 发送 OCR 请求到腾讯云                                     │
-│  5. 接收识别结果（文字区域坐标）                               │
-└─────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────┐
-│                   对话合并模块 (Dialog Merger)                │
-│  1. X轴分组：同一列气泡 X 坐标差异 < 150px                   │
-│  2. Y轴排序：组内按 Y 坐标排序                               │
-│  3. 合并判断：Y轴距离 < 50px 时合并为同一对话                 │
-└─────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────┐
-│                   批量翻译模块 (Batch Translator)             │
-│  1. 合并后的对话作为一个翻译单元                              │
-│  2. 调用 MiniMax API 进行翻译                                │
-│  3. 保持原文与译文的对应关系                                  │
-└─────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────┐
-│                   覆盖层渲染 (Translation Overlay)            │
-│  1. 在原图片位置绘制翻译文字                                  │
-│  2. 应用用户选择的字体样式                                    │
-│  3. 添加半透明背景提高可读性                                  │
-└─────────────────────────────────────────────────────────────┘
-```
-
-## 📝 License
-
-MIT License
 
 ---
 
-Made with ❤️ for manga lovers
+## 更新日志
+
+### v1.0.5 (当前版本)
+
+- 支持腾讯云 OCR 直接 API 模式
+- 新增 Hugging Face 本地 PaddleOCR 模型
+- 实现 OCR/翻译双队列并发控制
+- 优化 Pixiv 图片防盗链处理
+- 对话合并算法优化
+
+---
+
+## License
+
+MIT License - 详见 [LICENSE](LICENSE) 文件
+
+---
+
+## 致谢
+
+- [腾讯云 OCR](https://cloud.tencent.com/product/ocr) - 文字识别服务
+- [MiniMax](https://www.minimaxi.com/) - 翻译 API
+- [Hugging Face](https://huggingface.co/) - 开源模型托管
+- [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) - 开源 OCR 引擎
