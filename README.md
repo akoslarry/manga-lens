@@ -125,8 +125,9 @@ npm run build   # 构建生产版本
 #### 腾讯云 OCR
 
 1. 访问 [腾讯云控制台](https://console.cloud.tencent.com/cam/capi)
-2. 创建访问密钥，获取 SecretId 和 SecretKey
-3. 开通 [通用印刷体识别](https://console.cloud.tencent.com/ocr/overview) 服务
+2. 创建子用户，并授权	QcloudOCRFullAccess。
+3. 访问密钥，获取 SecretId 和 SecretKey
+4. 开通 [通用文字识别（高精度版）](https://console.cloud.tencent.com/ocr/overview) 服务
 
 #### MiniMax 翻译
 
@@ -251,7 +252,7 @@ interface DialogMergerConfig {
 | 选项 | 说明 |
 |------|------|
 | 字体 | 可选多种字体 |
-| 背景 | 半透明黑色背景 |
+| 背景 | 半透明白色背景 |
 | 描边 | 文字描边防止覆盖 |
 | 字号 | 根据原文长度自动调整 |
 
@@ -306,16 +307,7 @@ interface DialogMergerConfig {
    - 点击扩展图标
    - 查看处理进度和统计
 
-### 调试功能
 
-打开浏览器控制台 (F12)，可使用：
-
-```javascript
-window.debugPixivImage()           // 调试 Pixiv 图片请求
-window.testPixivReferer(imageUrl)  // 测试 Referer 头
-```
-
----
 
 ## 常见问题
 
@@ -351,31 +343,36 @@ A: 打开 `chrome://extensions/`，找到 MangaLens，点击"移除"。
 
 ---
 
-## License
 
-本项目采用 **MIT License** 开源许可证。
 
-### MIT License 是什么？
+## 未来开发目标
 
-MIT License 是一种开源许可证，具有以下特点：
+### 短期目标
 
-**允许**：
-- ✅ 商业使用
-- ✅ 修改代码
-- ✅ 分发代码
-- ✅ 私有使用
+- [ ] **主流漫画网站防爬虫适配**
+  - 针对 Pixiv、FANBOX、漫画王等主流漫画网站的反爬机制进行适配
+  - 实现 Referer 伪装、Cookie 处理、UA 轮换等机制
+  - 解决 403/418 等常见反爬限制
 
-**要求**：
-- ⚠️ 必须包含原始版权声明和许可证文本
+- [ ] **导出翻译结果为 PDF**
+  - 支持将翻译后的漫画页面导出为 PDF 格式
+  - 保留原图质量和翻译覆盖层
+  - 支持批量导出和分章节打包
 
-**禁止**（无此限制）：
-- ❌ 不禁止任何使用方式
+### 中期目标
 
-### 简而言之
+- [ ] **跨平台支持**
+  - **手机端应用**：开发 Android/iOS 原生应用或 Flutter 跨平台应用
+  - **电脑端桌面版**：Electron 桌面应用，无需浏览器扩展即可使用
+  - 实现更稳定的图片获取和 OCR 识别能力
 
-使用本项目代码时，只需在项目中包含 LICENSE 文件并保留原作者版权声明即可。你可以自由地使用、修改、甚至商业化本项目的代码。
+### 长期目标
 
-详细内容请参阅 [LICENSE](LICENSE) 文件。
+- [ ] **SaaS 云服务化**
+  - 用户无需自行注册和配置 API 密钥
+  - 所有 OCR/翻译能力由项目方统一管理和付费
+  - 采用订阅制商业模式，支持多档位会员体系
+  - 提供稳定、快速、一键使用的用户体验
 
 ---
 
@@ -383,5 +380,3 @@ MIT License 是一种开源许可证，具有以下特点：
 
 - [腾讯云 OCR](https://cloud.tencent.com/product/ocr) - 文字识别服务
 - [MiniMax](https://www.minimaxi.com/) - 翻译 API
-- [Hugging Face](https://huggingface.co/) - 开源模型托管
-- [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) - 开源 OCR 引擎
