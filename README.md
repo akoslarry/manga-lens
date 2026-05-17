@@ -117,7 +117,7 @@ npm run build   # 构建生产版本
 | **腾讯云 SecretId** | OCR API 身份标识 | 是 |
 | **腾讯云 SecretKey** | OCR API 密钥 | 是 |
 | **MiniMax API Key** | 翻译 API 密钥 | 是 |
-| **OCR 模式** | 云函数 / 直接 API / 本地模型 | 是 |
+| **OCR 模式** | 直接 API（腾讯云 OCR） | 是 |
 | **腾讯云地域** | 如 ap-guangzhou | 是 |
 
 ### API 密钥获取
@@ -165,11 +165,7 @@ manga-lens/
 │       ├── dialog-merger.ts      # 对话合并算法
 │       ├── batch-translator.ts   # 批量翻译
 │       ├── image-detector.ts     # 图片检测
-│       ├── cloud-ocr-client.ts   # 云函数 OCR 客户端
 │       └── tencent-cloud-ocr-direct.ts # 腾讯云 OCR 直连
-│
-├── cloud-functions/              # 云函数代码
-│   └── tencent-ocr/             # 腾讯云 OCR 云函数
 │
 ├── package.json                  # 项目配置
 ├── vite.config.ts               # Vite 配置
