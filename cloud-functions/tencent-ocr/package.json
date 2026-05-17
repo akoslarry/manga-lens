@@ -1,0 +1,23 @@
+{
+  "name": "mangalens-tencent-ocr",
+  "version": "1.0.0",
+  "description": "MangaLens腾讯云OCR云函数代理",
+  "main": "index.js",
+  "scripts": {
+    "test": "node test-local.js"
+  },
+  "dependencies": {
+    "tencentcloud-sdk-nodejs": "^4.1.221"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "keywords": [
+    "tencentcloud",
+    "ocr",
+    "cloud-function",
+    "mangalens"
+  ],
+  "author": "MangaLens Team",
+  "license": "MIT"
+}

@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "MangaLens - 漫画实时翻译器",
+  "version": "1.0.5",
+  "description": "实时识别并翻译漫画中的日文，让阅读生肉漫画不再是障碍",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "cookies"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content-script.js"],
+      "css": ["content-styles.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  }
+}

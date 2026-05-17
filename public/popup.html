@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MangaLens</title>
+  <link rel="stylesheet" href="popup/popup.css">
+</head>
+<body>
+  <div class="container">
+    <!-- 头部 -->
+    <div class="header">
+      <h1>📚 MangaLens</h1>
+      <p>漫画实时翻译器</p>
+    </div>
+
+    <!-- 状态卡片 -->
+    <div class="card">
+      <div class="card-title">状态</div>
+      <div class="toggle-row">
+        <span class="toggle-label">开启翻译</span>
+        <label class="toggle">
+          <input type="checkbox" id="toggleEnabled" checked>
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+      <div class="status">
+        <div class="status-item">
+          <div class="status-value" id="processedCount">0</div>
+          <div class="status-label">已处理图片</div>
+        </div>
+        <div class="status-item">
+          <div class="status-value" id="cacheCount">0</div>
+          <div class="status-label">翻译缓存</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 配置卡片 -->
+    <div class="card">
+      <div class="card-title">⚙️ API 配置</div>
+      <div id="alertContainer"></div>
+      
+      <!-- 标签页 -->
+      <div class="tabs">
+        <button class="tab active" data-tab="minimax">翻译 API</button>
+        <button class="tab" data-tab="ocr">OCR 设置</button>
+      </div>
+      
+      <!-- 翻译 API 配置 -->
+      <div class="tab-content active" id="tab-minimax">
+        <div class="form-group">
+          <label class="form-label">MiniMax API Key</label>
+          <input type="password" class="form-input" id="minimaxKey" placeholder="sk-cp-xxx">
+          <p class="form-hint">Token Plan Key，免费额度高</p>
+        </div>
+        
+        <p class="form-hint" style="margin-bottom: 8px;">
+          💡 获取地址：<br>
+          <a href="https://platform.minimaxi.com/user-center/basic-information/interface-key" target="_blank">MiniMax 控制台</a>
+        </p>
+        
+        <button class="btn btn-primary" id="btnSave">💾 保存配置</button>
+        <button class="btn btn-secondary" id="btnTest">🧪 测试连接</button>
+      </div>
+      
+      <!-- OCR 配置 -->
+      <div class="tab-content" id="tab-ocr">
+        <div id="directConfigSection">
+          <div class="form-group">
+            <label class="form-label">腾讯云 SecretId</label>
+            <input type="text" class="form-input" id="tencentSecretId" placeholder="AKIDxxxxxxxxxxxxxxxxx">
+            <p class="form-hint">在腾讯云控制台获取</p>
+          </div>
+          
+          <div class="form-group">
+            <label class="form-label">腾讯云 SecretKey</label>
+            <input type="password" class="form-input" id="tencentSecretKey" placeholder="xxxxxxxxxxxxxxxx">
+            <p class="form-hint">⚠️ 密钥将存储在本地，谨慎使用</p>
+          </div>
+          
+          <div class="form-group">
+            <label class="form-label">区域</label>
+            <select class="form-input" id="directRegion">
+              <option value="ap-guangzhou">广州 (ap-guangzhou)</option>
+              <option value="ap-shanghai">上海 (ap-shanghai)</option>
+              <option value="ap-beijing">北京 (ap-beijing)</option>
+              <option value="ap-singapore">新加坡 (ap-singapore)</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">OCR 识别模式</label>
+            <select class="form-input" id="directAction">
+              <option value="GeneralAccurateOCR">🎯 高精度识别 (推荐) - 漫画/手写体</option>
+              <option value="GeneralBasicOCR">📝 基础识别 - 印刷体</option>
+              <option value="HandwritingOCR">✍️ 手写体识别</option>
+              <option value="EnglishOCR">🔤 英文识别</option>
+            </select>
+            <p class="form-hint">漫画推荐使用"高精度识别"，印刷内容用"基础识别"</p>
+          </div>
+          
+          <div class="btn-row">
+            <button class="btn btn-primary" id="btnSaveDirect">💾 保存配置</button>
+            <button class="btn btn-secondary" id="btnTestDirect">🧪 测试连接</button>
+          </div>
+          
+          <p class="form-hint" style="margin-top: 10px; color: #667eea;">
+            📖 使用高精度OCR，识别准确率 99%，支持日文手写体
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <!-- 字体设置卡片 -->
+    <div class="card">
+      <div class="card-title">🔤 字体设置</div>
+      <div class="form-group">
+        <label class="form-label">默认字体大小 (px)</label>
+        <input type="number" class="form-input" id="fontSize" value="17" min="10" max="36" step="1" style="width: 80px;">
+        <p class="form-hint">范围：10-36px（仅对新建翻译生效）</p>
+      </div>
+    </div>
+
+    <!-- 操作卡片 -->
+    <div class="card">
+      <div class="card-title">操作</div>
+      <button class="btn btn-primary" id="btnRefresh">🔄 刷新页面翻译</button>
+      <button class="btn btn-secondary" id="btnSelect">🎯 手动选择图片或重新翻译</button>
+    </div>
+
+    <!-- 页脚 -->
+    <div class="footer">
+      <p>MangaLens 漫画实时翻译</p>
+      <p>v3.0 | 高精度OCR · 直接API</p>
+    </div>
+  </div>
+
+  <script src="popup.js" type="module"></script>
+</body>
+</html>

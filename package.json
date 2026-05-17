@@ -1,0 +1,23 @@
+{
+  "name": "manga-lens",
+  "version": "1.0.0",
+  "description": "MangaLens - 漫画实时翻译器，让你无感阅读生肉漫画",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build && node post-build.mjs",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3.0.0",
+    "crypto-js": "^4.2.0",
+    "vue": "^3.4.21"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.263",
+    "@types/crypto-js": "^4.2.2",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.4.0",
+    "vite": "^5.2.0"
+  }
+}
