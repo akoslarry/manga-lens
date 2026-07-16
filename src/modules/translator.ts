@@ -1,6 +1,6 @@
 /**
  * 翻译模块
- * 支持多种翻译 API：腾讯云、MyMemory、MiniMax
+ * 支持多种翻译 API：腾讯云、MyMemory、DeepSeek
  */
 
 export interface TranslationResult {
@@ -12,7 +12,7 @@ export interface TranslationResult {
 export interface TranslatorConfig {
   tencentSecretId?: string;
   tencentSecretKey?: string;
-  minimaxApiKey?: string;
+  deepseekApiKey?: string;
 }
 
 export class Translator {
@@ -20,7 +20,7 @@ export class Translator {
   private useCount = {
     tencent: 0,
     mymemory: 0,
-    minimax: 0
+    deepseek: 0
   };
 
   /**
@@ -30,7 +30,7 @@ export class Translator {
     this.config = config;
     console.log('[MangaLens] 翻译模块配置完成', {
       hasTencent: !!config.tencentSecretId,
-      hasMinimax: !!config.minimaxApiKey
+      hasDeepSeek: !!config.deepseekApiKey
     });
   }
 
@@ -55,17 +55,17 @@ export class Translator {
     let result: TranslationResult;
     let success = false;
 
-    // 1. 首先尝试 MiniMax（用户提供的）
-    if (this.config.minimaxApiKey) {
+    // 1. 首先尝试 DeepSeek（用户提供的）
+    if (this.config.deepseekApiKey) {
       try {
-        result = await this.translateWithMiniMax(cleanText);
+        result = await this.translateWithDeepSeek(cleanText);
         if (result.translatedText) {
-          this.useCount.minimax++;
-          console.log('[MangaLens] ✓ MiniMax 翻译成功');
+          this.useCount.deepseek++;
+          console.log('[MangaLens] ✓ DeepSeek 翻译成功');
           success = true;
         }
       } catch (error) {
-        console.warn('[MangaLens] MiniMax 翻译失败:', error);
+        console.warn('[MangaLens] DeepSeek 翻译失败:', error);
       }
     }
 
@@ -104,19 +104,19 @@ export class Translator {
   }
 
   /**
-   * 使用 MiniMax API 翻译
+   * 使用 DeepSeek V4 Pro API 翻译
    */
-  private async translateWithMiniMax(text: string): Promise<TranslationResult> {
-    const apiKey = this.config.minimaxApiKey!;
+  private async translateWithDeepSeek(text: string): Promise<TranslationResult> {
+    const apiKey = this.config.deepseekApiKey!;
     
-    const response = await fetch('https://api.minimaxi.com/v1/chat/completions', {
+    const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${apiKey}`
       },
       body: JSON.stringify({
-        model: 'MiniMax-M2.7',
+        model: 'deepseek-v4-pro',
         messages: [
           {
             role: 'system',
@@ -143,7 +143,7 @@ export class Translator {
 
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`MiniMax API 错误: ${response.status} - ${errorText}`);
+      throw new Error(`DeepSeek API 错误: ${response.status} - ${errorText}`);
     }
 
     const data = await response.json();
@@ -157,7 +157,7 @@ export class Translator {
       };
     }
 
-    throw new Error('MiniMax API 返回格式错误');
+    throw new Error('DeepSeek API 返回格式错误');
   }
 
   /**
@@ -302,7 +302,7 @@ export class Translator {
   /**
    * 获取使用统计
    */
-  getUsageStats(): { tencent: number; mymemory: number; minimax: number } {
+  getUsageStats(): { tencent: number; mymemory: number; deepseek: number } {
     return { ...this.useCount };
   }
 

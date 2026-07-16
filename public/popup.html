@@ -43,21 +43,21 @@
       
       <!-- 标签页 -->
       <div class="tabs">
-        <button class="tab active" data-tab="minimax">翻译 API</button>
+        <button class="tab active" data-tab="deepseek">翻译 API</button>
         <button class="tab" data-tab="ocr">OCR 设置</button>
       </div>
       
       <!-- 翻译 API 配置 -->
-      <div class="tab-content active" id="tab-minimax">
+      <div class="tab-content active" id="tab-deepseek">
         <div class="form-group">
-          <label class="form-label">MiniMax API Key</label>
-          <input type="password" class="form-input" id="minimaxKey" placeholder="sk-cp-xxx">
-          <p class="form-hint">Token Plan Key，免费额度高</p>
+          <label class="form-label">DeepSeek API Key</label>
+          <input type="password" class="form-input" id="deepseekKey" placeholder="sk-xxx">
+          <p class="form-hint">支持环境变量 DS_API_KEY，留空自动使用环境变量</p>
         </div>
         
         <p class="form-hint" style="margin-bottom: 8px;">
           💡 获取地址：<br>
-          <a href="https://platform.minimaxi.com/user-center/basic-information/interface-key" target="_blank">MiniMax 控制台</a>
+          <a href="https://platform.deepseek.com/api_keys" target="_blank">DeepSeek 控制台</a>
         </p>
         
         <button class="btn btn-primary" id="btnSave">💾 保存配置</button>

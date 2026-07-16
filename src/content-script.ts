@@ -5,7 +5,7 @@
  * 
  * 新功能：
  * - 对话合并（Y轴聚类 + X轴排序）
- * - 批量翻译（MiniMax API 编号映射）
+ * - 批量翻译（DeepSeek V4 Pro API 编号映射）
  * - 翻译覆盖层（横排译文 → 竖排原文位置）
  */
 
@@ -24,7 +24,7 @@ interface MangaLensState {
   processedImages: Set<string>;
   apiKey: string;
   apiSecret: string;
-  minimaxApiKey: string;
+  deepseekApiKey: string;
 }
 
 const state: MangaLensState = {
@@ -33,7 +33,7 @@ const state: MangaLensState = {
   processedImages: new Set(),
   apiKey: '',
   apiSecret: '',
-  minimaxApiKey: ''
+  deepseekApiKey: ''
 };
 
 // ============================================
@@ -193,8 +193,8 @@ async function translateAndRender(
     return;
   }
 
-  // Check if API is configured
-  if (!state.apiKey && !state.minimaxApiKey) {
+  // Check if API is configured (first occurrence - auto process queue)
+  if (!state.apiKey && !state.deepseekApiKey) {
     console.error('[MangaLens] Translation API not configured! Please configure API key in settings.');
     return;
   }
@@ -246,16 +246,16 @@ async function translateAndRender(
 
     console.log(`[MangaLens] ✓ Dialog merge complete, merged into ${mergedDialogs.length} bubbles`);
 
-    // 3. Batch translation (using MiniMax API)
-    if (!state.minimaxApiKey) {
-      console.error('[MangaLens] MiniMax API Key not configured! Please configure in settings.');
+    // 3. Batch translation (using DeepSeek V4 Pro API)
+    if (!state.deepseekApiKey) {
+      console.error('[MangaLens] DeepSeek API Key not configured! Please configure in settings.');
       return;
     }
 
     console.log('[MangaLens] Batch translating...');
 
     const batchTranslator = new BatchTranslator({
-      apiKey: state.minimaxApiKey
+      apiKey: state.deepseekApiKey
     });
 
     // Prepare translation data (with IDs)
@@ -334,8 +334,8 @@ async function processImage(image: DetectedImage): Promise<void> {
     return;
   }
 
-  // Check if API is configured
-  if (!state.apiKey && !state.minimaxApiKey) {
+  // Check if API is configured (manual processing)
+  if (!state.apiKey && !state.deepseekApiKey) {
     console.error('[MangaLens] Translation API not configured! Please configure API key in settings.');
     return;
   }
@@ -382,9 +382,9 @@ async function processImage(image: DetectedImage): Promise<void> {
 
     console.log(`[MangaLens] ✓ Dialog merge complete, merged into ${mergedDialogs.length} bubbles`);
 
-    // 3. Batch translation (using MiniMax API)
-    if (!state.minimaxApiKey) {
-      console.error('[MangaLens] MiniMax API Key not configured! Please configure in settings.');
+    // 3. Batch translation (using DeepSeek V4 Pro API)
+    if (!state.deepseekApiKey) {
+      console.error('[MangaLens] DeepSeek API Key not configured! Please configure in settings.');
       hideLoading();
       return;
     }
@@ -393,7 +393,7 @@ async function processImage(image: DetectedImage): Promise<void> {
     console.log('[MangaLens] Step 3/4: Batch translating...');
 
     const batchTranslator = new BatchTranslator({
-      apiKey: state.minimaxApiKey
+      apiKey: state.deepseekApiKey
     });
 
     // Prepare translation data (with IDs)
@@ -550,13 +550,13 @@ async function initialize(): Promise<void> {
 
     // 2. Load configuration from storage
     console.log('[MangaLens] Step 2/3: Loading configuration...');
-    const stored = await chrome.storage.local.get(['apiKey', 'apiSecret', 'minimaxApiKey', 'isEnabled']);
-    if (stored.apiKey || stored.minimaxApiKey) {
+    const stored = await chrome.storage.local.get(['apiKey', 'apiSecret', 'deepseekApiKey', 'isEnabled']);
+    if (stored.apiKey || stored.deepseekApiKey) {
       state.apiKey = stored.apiKey || '';
       state.apiSecret = stored.apiSecret || '';
-      state.minimaxApiKey = stored.minimaxApiKey || '';
+      state.deepseekApiKey = stored.deepseekApiKey || '';
       translator.configure({
-        minimaxApiKey: state.minimaxApiKey,
+        deepseekApiKey: state.deepseekApiKey,
         tencentSecretId: state.apiKey,
         tencentSecretKey: state.apiSecret
       });
@@ -645,16 +645,16 @@ chrome.runtime.onMessage.addListener(async (message, sender, sendResponse) => {
       break;
 
     case 'CONFIGURE_API':
-      state.minimaxApiKey = message.minimaxApiKey || '';
+      state.deepseekApiKey = message.deepseekApiKey || '';
       state.apiKey = message.apiKey || '';
       state.apiSecret = message.apiSecret || '';
       translator.configure({
-        minimaxApiKey: state.minimaxApiKey,
+        deepseekApiKey: state.deepseekApiKey,
         tencentSecretId: state.apiKey,
         tencentSecretKey: state.apiSecret
       });
       chrome.storage.local.set({ 
-        minimaxApiKey: message.minimaxApiKey,
+        deepseekApiKey: message.deepseekApiKey,
         apiKey: message.apiKey, 
         apiSecret: message.apiSecret 
       });

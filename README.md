@@ -16,7 +16,7 @@
 | 功能 | 说明 |
 |------|------|
 | **腾讯云 OCR** | 支持通用印刷体和高精度版文字识别 |
-| **智能翻译** | 支持 MiniMax API 翻译 |
+| **智能翻译** | 支持 DeepSeek V4 Pro API 翻译 |
 | **并发控制** | OCR 队列（3并发）+ 翻译队列（5并发），避免 API 限流 |
 | **对话合并** | 基于距离聚类算法，将分散文字合并为完整句子 |
 | **四角锚点** | 8点锚点标记，自动检测图片旋转并校正坐标 |
@@ -48,7 +48,7 @@
 │                    ┌──────────────┼──────────────┐              │
 │                    │              │              │              │
 │              ┌─────▼─────┐ ┌──────▼─────┐ ┌─────▼─────┐        │
-│              │ 图片获取  │ │ 腾讯云 OCR  │ │ MiniMax   │        │
+│              │ 图片获取  │ │ 腾讯云 OCR  │ │ DeepSeek  │        │
 │              │           │ │  (Base64)  │ │ 翻译 API  │        │
 │              └───────────┘ └────────────┘ └───────────┘        │
 │                                                                  │
@@ -114,9 +114,9 @@ npm run build   # 构建生产版本
 | 配置项 | 说明 | 必填 |
 |--------|------|------|
 | **翻译开关** | 开启/关闭翻译功能 | 是 |
+| **DeepSeek API Key** | 翻译 API 密钥 | 是（支持环境变量 `DS_API_KEY`） |
 | **腾讯云 SecretId** | OCR API 身份标识 | 是 |
 | **腾讯云 SecretKey** | OCR API 密钥 | 是 |
-| **MiniMax API Key** | 翻译 API 密钥 | 是 |
 | **OCR 模式** | 直接 API（腾讯云 OCR） | 是 |
 | **腾讯云地域** | 如 ap-guangzhou | 是 |
 
@@ -129,10 +129,11 @@ npm run build   # 构建生产版本
 3. 访问密钥，获取 SecretId 和 SecretKey
 4. 开通 [通用文字识别（高精度版）](https://console.cloud.tencent.com/ocr/overview) 服务
 
-#### MiniMax 翻译
+#### DeepSeek 翻译
 
-1. 访问 [MiniMax 控制台](https://www.minimaxi.com/user-center/basic-information/interface-key)
+1. 访问 [DeepSeek 控制台](https://platform.deepseek.com/api_keys)
 2. 创建 API Key
+3. 将 Key 填入扩展配置，或设置环境变量 `DS_API_KEY`
 
 ---
 
@@ -159,7 +160,7 @@ manga-lens/
 │   │
 │   └── modules/                  # 功能模块
 │       ├── ocr-engine.ts         # OCR 引擎 + 锚点机制
-│       ├── translator.ts         # 翻译模块（MiniMax）
+│       ├── translator.ts         # 翻译模块（DeepSeek V4 Pro）
 │       ├── local-translator.ts   # 本地翻译（可选）
 │       ├── translation-overlay.ts # 翻译覆盖层渲染
 │       ├── dialog-merger.ts      # 对话合并算法
@@ -375,4 +376,4 @@ A: 打开 `chrome://extensions/`，找到 MangaLens，点击"移除"。
 ## 致谢
 
 - [腾讯云 OCR](https://cloud.tencent.com/product/ocr) - 文字识别服务
-- [MiniMax](https://www.minimaxi.com/) - 翻译 API
+- [DeepSeek](https://www.deepseek.com/) - 翻译 API

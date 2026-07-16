@@ -2,7 +2,7 @@
  * 批量翻译模块
  * 
  * 专为漫画对话批量翻译设计：
- * 1. 将多段对话打包发送给 MiniMax API
+ * 1. 将多段对话打包发送给 DeepSeek V4 Pro API
  * 2. 使用严格格式的 Prompt，确保返回结果可解析
  * 3. 按编号映射翻译结果到原始对话
  */
@@ -27,12 +27,12 @@ export interface BatchTranslationResult {
   successCount: number;
   /** 失败的数量 */
   failureCount: number;
-  /** MiniMax 请求 ID */
+  /** DeepSeek 请求 ID */
   requestId?: string;
 }
 
 export interface BatchTranslationConfig {
-  /** MiniMax API Key */
+  /** DeepSeek API Key */
   apiKey: string;
   /** API 端点（可选，默认使用官方端点） */
   endpoint?: string;
@@ -51,8 +51,8 @@ export interface BatchTranslationConfig {
 /** 默认配置 */
 const DEFAULT_CONFIG: Required<BatchTranslationConfig> = {
   apiKey: '',
-  endpoint: 'https://api.minimaxi.com/v1/chat/completions',
-  model: 'MiniMax-M2.7',
+  endpoint: 'https://api.deepseek.com/v1/chat/completions',
+  model: 'deepseek-v4-pro',
   temperature: 0.7,
   maxTokens: 4000,
   // 【修改】每张图片一次翻译通信，不再分批
@@ -194,7 +194,7 @@ export class BatchTranslator {
 
   constructor(config: BatchTranslationConfig) {
     if (!config.apiKey) {
-      throw new Error('MiniMax API Key 不能为空');
+      throw new Error('DeepSeek API Key 不能为空');
     }
     this.config = { ...DEFAULT_CONFIG, ...config };
   }
@@ -215,8 +215,8 @@ export class BatchTranslator {
     console.log(`[BatchTranslator] 开始批量翻译 ${items.length} 段对话...`);
 
     try {
-      // 调用 MiniMax API
-      const response = await this.callMiniMaxAPI(items);
+      // 调用 DeepSeek API
+      const response = await this.callDeepSeekAPI(items);
       
       // 解析响应
       const translations = parseTranslationResponse(response.content, items.map(i => i.id));
@@ -271,9 +271,9 @@ export class BatchTranslator {
   }
 
   /**
-   * 调用 MiniMax API
+   * 调用 DeepSeek V4 Pro API
    */
-  private async callMiniMaxAPI(
+  private async callDeepSeekAPI(
     items: Array<{ id: number; text: string }>
   ): Promise<{ content: string; requestId: string }> {
     const prompt = buildBatchPrompt(items);
@@ -303,13 +303,13 @@ export class BatchTranslator {
 
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`MiniMax API 错误: ${response.status} - ${errorText}`);
+      throw new Error(`DeepSeek API 错误: ${response.status} - ${errorText}`);
     }
 
     const data = await response.json();
 
     if (!data.choices || data.choices.length === 0) {
-      throw new Error('MiniMax API 返回格式错误');
+      throw new Error('DeepSeek API 返回格式错误');
     }
 
     const content = data.choices[0].message?.content?.trim() || '';

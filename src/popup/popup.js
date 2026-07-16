@@ -1,11 +1,11 @@
 /**
  * Popup Script - 弹出窗口逻辑
- * v3.0 - 高精度OCR直接API模式
+ * v3.1 - DeepSeek V4 Pro 翻译引擎
  */
 
 // DOM 元素
 const toggleEnabled = document.getElementById('toggleEnabled');
-const minimaxKeyInput = document.getElementById('minimaxKey');
+const deepseekKeyInput = document.getElementById('deepseekKey');
 const btnSave = document.getElementById('btnSave');
 const btnTest = document.getElementById('btnTest');
 const btnRefresh = document.getElementById('btnRefresh');
@@ -50,12 +50,12 @@ async function updateStatus() {
 // 加载保存的配置
 async function loadConfig() {
   const result = await chrome.storage.local.get([
-    'apiKey', 'apiSecret', 'minimaxApiKey', 'isEnabled',
+    'apiKey', 'apiSecret', 'deepseekApiKey', 'isEnabled',
     'tencentSecretId', 'tencentSecretKey', 'directRegion', 'directAction'
   ]);
   
-  if (result.minimaxApiKey) {
-    minimaxKeyInput.value = result.minimaxApiKey;
+  if (result.deepseekApiKey) {
+    deepseekKeyInput.value = result.deepseekApiKey;
   }
   toggleEnabled.checked = result.isEnabled !== false;
   
@@ -88,17 +88,16 @@ init();
 
 // 保存配置
 btnSave.addEventListener('click', async () => {
-  const minimaxKey = minimaxKeyInput.value.trim();
+  const deepseekKey = deepseekKeyInput.value.trim();
 
-  // 至少需要一个 API 密钥
-  if (!minimaxKey) {
-    showAlert('请填写 MiniMax API 密钥', 'error');
-    return;
+  // 允许不填（使用环境变量），但至少提示
+  if (!deepseekKey) {
+    showAlert('⚠️ DeepSeek API Key 为空，将尝试使用环境变量 DS_API_KEY', 'warning');
   }
 
   // 保存到 storage
   await chrome.storage.local.set({
-    minimaxApiKey: minimaxKey
+    deepseekApiKey: deepseekKey
   });
 
   // 通知 content script
@@ -107,36 +106,36 @@ btnSave.addEventListener('click', async () => {
     if (tab.id) {
       await chrome.tabs.sendMessage(tab.id, {
         type: 'CONFIGURE_API',
-        minimaxApiKey: minimaxKey
+        deepseekApiKey: deepseekKey
       });
     }
   } catch (error) {
     console.error('通知 content script 失败:', error);
   }
 
-  showAlert('✅ MiniMax 配置已保存！', 'success');
+  showAlert('✅ DeepSeek 配置已保存！', 'success');
 });
 
 // 测试连接
 btnTest.addEventListener('click', async () => {
-  const minimaxKey = minimaxKeyInput.value.trim();
+  const deepseekKey = deepseekKeyInput.value.trim();
 
-  if (!minimaxKey) {
-    showAlert('请先填写 API 密钥', 'error');
+  if (!deepseekKey) {
+    showAlert('请先填写 DeepSeek API Key', 'error');
     return;
   }
 
-  showAlert('正在测试连接...', 'warning');
+  showAlert('正在测试 DeepSeek 连接...', 'warning');
 
   try {
-    const response = await fetch('https://api.minimaxi.com/v1/chat/completions', {
+    const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${minimaxKey}`
+        'Authorization': `Bearer ${deepseekKey}`
       },
       body: JSON.stringify({
-        model: 'MiniMax-M2.7',
+        model: 'deepseek-v4-pro',
         messages: [
           { role: 'user', content: '你好' }
         ],
@@ -145,7 +144,7 @@ btnTest.addEventListener('click', async () => {
     });
 
     if (response.ok) {
-      showAlert('✅ MiniMax API 连接成功！', 'success');
+      showAlert('✅ DeepSeek API 连接成功！', 'success');
     } else {
       const error = await response.text();
       showAlert(`❌ 连接失败: ${response.status}`, 'error');

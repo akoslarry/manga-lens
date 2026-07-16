@@ -106,10 +106,10 @@ interface ExtensionConfig {
     tencentSecretKey?: string;
   };
   translation: {
-    provider: 'minimax' | 'tencent' | 'mymemory';
-    minimaxApiKey?: string;
-    minimaxEndpoint?: string;
-    minimaxModel?: string;
+    provider: 'deepseek' | 'tencent' | 'mymemory';
+    deepseekApiKey?: string;
+    deepseekEndpoint?: string;
+    deepseekModel?: string;
   };
 }
 
@@ -2042,13 +2042,13 @@ export class MangaOCR {
    * 
    * @param imageElement 图片元素
    * @param mergerConfig 对话合并配置
-   * @param minimaxApiKey MiniMax API Key
+   * @param deepseekApiKey DeepSeek API Key
    * @param onProgress 进度回调（可选）
    */
   async recognizeAndTranslate(
     imageElement: HTMLImageElement,
     mergerConfig?: Partial<DialogMergerConfig>,
-    minimaxApiKey?: string,
+    deepseekApiKey?: string,
     onProgress?: (stage: string, progress: number) => void
   ): Promise<RecognitionTranslationResult> {
     console.log('[MangaLens] 开始完整翻译流程...');
@@ -2071,11 +2071,11 @@ export class MangaOCR {
     // 阶段2：批量翻译
     onProgress?.('translating', 0);
     
-    // 获取 MiniMax API Key（优先使用传入的参数，其次使用配置）
-    const apiKey = minimaxApiKey || this.config?.translation?.minimaxApiKey;
+    // 获取 DeepSeek API Key（优先使用传入的参数，其次使用配置）
+    const apiKey = deepseekApiKey || this.config?.translation?.deepseekApiKey;
     
     if (!apiKey) {
-      console.warn('[MangaLens] 未配置 MiniMax API Key，无法翻译');
+      console.warn('[MangaLens] 未配置 DeepSeek API Key，无法翻译');
       return {
         dialogs,
         translation: { 
@@ -2085,7 +2085,7 @@ export class MangaOCR {
             id: i + 1,
             originalText: d.text,
             success: false,
-            error: '未配置 MiniMax API Key'
+            error: '未配置 DeepSeek API Key'
           }))
         },
         rawResult,
