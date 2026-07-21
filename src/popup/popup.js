@@ -356,6 +356,33 @@ btnSaveBatchLimit.addEventListener('click', async () => {
   updateStatus();
 });
 
+// PDF导出
+const pdfSavePath = document.getElementById('pdfSavePath');
+const btnEnterPdfMode = document.getElementById('btnEnterPdfMode');
+
+btnEnterPdfMode.addEventListener('click', async () => {
+  const savePath = pdfSavePath.value.trim();
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tab.id) {
+      const response = await chrome.tabs.sendMessage(tab.id, {
+        type: 'ENTER_PDF_MODE',
+        savePath
+      });
+      if (response && response.success) {
+        showAlert('📄 已进入PDF导出模式（页面顶部可见工具栏）', 'success');
+        window.close(); // 关闭popup让用户在页面上操作
+      } else if (response && response.message === 'no translated images') {
+        showAlert('⚠️ 暂无可导出的翻译结果，请先完成翻译', 'warning');
+      } else {
+        showAlert('进入PDF模式失败，请刷新页面后重试', 'error');
+      }
+    }
+  } catch (error) {
+    showAlert('操作失败，请刷新页面后重试', 'error');
+  }
+});
+
 // 继续翻译按钮
 btnContinueTranslation.addEventListener('click', async () => {
   try {

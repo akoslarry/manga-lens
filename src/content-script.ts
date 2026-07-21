@@ -17,6 +17,7 @@ import { overlayManager } from './modules/translation-overlay';
 import { DialogMerger, type OCRTextItem, type MergedDialog } from './modules/dialog-merger';
 import { BatchTranslator } from './modules/batch-translator';
 import { translationCache } from './modules/translation-cache';
+import { pdfExporter } from './modules/export-pdf';
 
 // State management
 interface MangaLensState {
@@ -36,6 +37,10 @@ const state: MangaLensState = {
   apiSecret: '',
   deepseekApiKey: ''
 };
+
+// PDF导出模式状态
+let pdfModeSavePath = '';
+let pdfModeEditDirty = false; // 用户是否有手动修改
 
 // ============================================
 // OCR Queue + Translation Queue System
@@ -197,6 +202,8 @@ function enqueueImage(image: DetectedImage): Promise<{ boxes: any[]; imageSrc: s
         });
         state.processedImages.add(imageSrc);
         updatePopupStatus();
+        // PDF模式同步
+        if (pdfExporter.pdfMode) pdfExporter.refreshCheckboxes();
         return { boxes: [], imageSrc };
       }
     }
@@ -349,6 +356,12 @@ async function translateAndRender(
     // 保存翻译结果到本地缓存
     await translationCache.set(imageSrc, mergedDialogs);
 
+    // 如果在PDF模式下，新翻译的图片自动同步
+    if (pdfExporter.pdfMode) {
+      pdfExporter.refreshCheckboxes();
+      console.log(`[MangaLens] 📄 PDF模式：新翻译图片已同步`);
+    }
+
     console.log(`[MangaLens] ✅ Complete! Translated ${translationResult.successCount} dialog segments`);
 
     // Update popup status
@@ -376,6 +389,29 @@ function hideLoading() {
   if (loader) loader.remove();
 }
 
+/** 显示右下角提示toast */
+function showAlertToast(message: string, duration = 3000): void {
+  const existing = document.getElementById('manga-lens-toast');
+  if (existing) existing.remove();
+
+  const toast = document.createElement('div');
+  toast.id = 'manga-lens-toast';
+  toast.style.cssText = `
+    position: fixed; bottom: 24px; right: 24px;
+    z-index: 2147483647;
+    background: linear-gradient(135deg, #1a1a2e, #16213e);
+    border: 1px solid rgba(102,126,234,0.4);
+    border-radius: 12px; padding: 14px 20px;
+    color: #e0e0e0; font-size: 14px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+    animation: ml-toast-in 0.3s ease;
+  `;
+  toast.textContent = `⚠️ ${message}`;
+  document.body.appendChild(toast);
+  setTimeout(() => toast.remove(), duration);
+}
+
 // Process single image (new version: integrated dialog merge + batch translation)
 async function processImage(image: DetectedImage): Promise<void> {
   const imageSrc = image.src;
@@ -399,6 +435,8 @@ async function processImage(image: DetectedImage): Promise<void> {
     });
     state.processedImages.add(imageSrc);
     updatePopupStatus();
+    // PDF模式同步
+    if (pdfExporter.pdfMode) pdfExporter.refreshCheckboxes();
     return;
   }
 
@@ -509,6 +547,9 @@ async function processImage(image: DetectedImage): Promise<void> {
 
     // 保存翻译结果到本地缓存
     await translationCache.set(imageSrc, mergedDialogs);
+
+    // PDF模式同步
+    if (pdfExporter.pdfMode) pdfExporter.refreshCheckboxes();
 
     hideLoading();
     console.log(`[MangaLens] ✅ Complete! Translated ${translationResult.successCount} dialog segments`);
@@ -746,6 +787,16 @@ async function initialize(): Promise<void> {
     // 4. 加载缓存开关状态
     await translationCache.loadEnabledState();
 
+    // 4.5 配置 pdfExporter 回调
+    pdfExporter.configure({
+      getOverlaysForImage: (img: HTMLImageElement) => overlayManager.getOverlaysForImage(img),
+      getTranslatedImages: () => overlayManager.getAllTranslatedImages(),
+      onExitRequest: () => handlePdfModeExit(),
+      onSaveEdits: (_imageSrc: string, _overlays: HTMLElement[]) => {
+        pdfModeEditDirty = true;
+      }
+    });
+
     // 5. Process images on current page (delayed execution to ensure page fully loaded)
     console.log('[MangaLens] Step 3/3: Scanning page for images...');
     
@@ -806,6 +857,72 @@ window.addEventListener('manga-lens-rerender', async (event: Event) => {
     console.error('[MangaLens] Re-render failed:', error);
   }
 });
+
+// ============================================
+// PDF导出模式 - 退出确认
+// ============================================
+
+async function handlePdfModeExit(): Promise<void> {
+  // 如果用户没有任何编辑操作，直接退出无需确认
+  if (!pdfModeEditDirty) {
+    pdfExporter.exitPdfMode();
+    pdfModeSavePath = '';
+    return;
+  }
+
+  const shouldRestore = confirm('是否恢复翻译原状？\n\n选择"确定"：丢弃手动修改，恢复原始翻译\n选择"取消"：保留您的修改，覆盖原始翻译结果');
+
+  if (shouldRestore) {
+    // 恢复原状：从缓存重新渲染所有图片
+    console.log('[MangaLens] 用户选择恢复原状，从缓存重新渲染');
+    const images = overlayManager.getAllTranslatedImages();
+    for (const img of images) {
+      const cachedDialogs = await translationCache.get(img.src);
+      if (cachedDialogs) {
+        overlayManager.rerenderFromCache(img, cachedDialogs);
+      }
+    }
+    pdfModeEditDirty = false;
+  } else {
+    // 保留修改：覆盖本地缓存
+    console.log('[MangaLens] 用户选择保留修改，持久化到本地缓存');
+    const images = overlayManager.getAllTranslatedImages();
+    for (const img of images) {
+      // 从当前缓存数据读取（因为数据结构不变，只是位置/文字被用户改了）
+      const cachedDialogs = await translationCache.get(img.src);
+      if (!cachedDialogs) continue;
+
+      // 收集用户修改后的覆盖层
+      const snapshots = overlayManager.collectOverlaySnapshots(img);
+
+      // 将文字修改反映回 MergedDialog
+      for (const snap of snapshots) {
+        // 匹配：遍历 overlays Map 找到对应的 TranslationOverlay
+        for (const [id, overlay] of (overlayManager as any).overlays) {
+          if (id === snap.id) {
+            // 找到对应的 MergedDialog（通过 originalBox 匹配）
+            for (const dialog of cachedDialogs) {
+              const box = dialog.boundingBox;
+              const origBox = overlay.originalBox;
+              if (box.x === origBox.x && box.y === origBox.y && box.width === origBox.width) {
+                dialog.translatedText = snap.text;
+                break;
+              }
+            }
+          }
+        }
+      }
+
+      // 覆盖写入缓存
+      await translationCache.set(img.src, cachedDialogs);
+    }
+    console.log('[MangaLens] ✅ 用户修改已持久化到本地缓存');
+  }
+
+  // 执行退出
+  pdfExporter.exitPdfMode();
+  pdfModeSavePath = '';
+}
 
 // Listen for messages from popup or background
 chrome.runtime.onMessage.addListener(async (message, sender, sendResponse) => {
@@ -983,6 +1100,38 @@ chrome.runtime.onMessage.addListener(async (message, sender, sendResponse) => {
     case 'UPDATE_BATCH_LIMIT':
       maxImagesPerBatch = Math.max(1, Math.min(100, message.limit || 30));
       console.log(`[MangaLens] 单次翻译上限已更新: ${maxImagesPerBatch}`);
+      sendResponse({ success: true });
+      break;
+
+    case 'ENTER_PDF_MODE':
+      // 1. 检查是否有已翻译图片
+      if (state.processedImages.size === 0) {
+        showAlertToast('暂无可导出的翻译结果，请先完成翻译');
+        sendResponse({ success: false, message: 'no translated images' });
+        break;
+      }
+      // 2. 进入PDF模式
+      pdfModeSavePath = message.savePath || '';
+      pdfModeEditDirty = false;
+      pdfExporter.enterPdfMode(pdfModeSavePath);
+      // 3. 启用覆盖层编辑
+      pdfExporter.enableOverlayEditing();
+      console.log('[MangaLens] 📄 已进入PDF导出模式');
+      sendResponse({ success: true });
+      break;
+
+    case 'EXIT_PDF_MODE':
+      handlePdfModeExit();
+      sendResponse({ success: true });
+      break;
+
+    case 'EXPORT_ALL_PDF':
+      pdfExporter.exportAll();
+      sendResponse({ success: true });
+      break;
+
+    case 'EXPORT_SELECTED_PDF':
+      pdfExporter.exportSelected();
       sendResponse({ success: true });
       break;
 

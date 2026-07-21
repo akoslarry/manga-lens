@@ -11,6 +11,8 @@
   "dependencies": {
     "@huggingface/transformers": "^3.0.0",
     "crypto-js": "^4.2.0",
+    "html2canvas": "^1.4.1",
+    "jspdf": "^4.2.1",
     "vue": "^3.4.21"
   },
   "devDependencies": {

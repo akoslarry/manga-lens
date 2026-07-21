@@ -666,6 +666,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         })();
         return true;
 
+      case 'DOWNLOAD_PDF':
+        chrome.downloads.download({
+          url: message.url,
+          filename: message.filename,
+          saveAs: message.saveAs || false
+        }, (downloadId) => {
+          if (chrome.runtime.lastError) {
+            console.error('[Background] PDF下载失败:', chrome.runtime.lastError);
+            sendResponse({ success: false, error: chrome.runtime.lastError.message });
+          } else {
+            console.log('[Background] ✅ PDF下载已触发, id:', downloadId);
+            sendResponse({ success: true, downloadId });
+          }
+        });
+        return true;
+
       // ============================================
       // 调试功能：显示图片获取的请求头信息
       // ============================================

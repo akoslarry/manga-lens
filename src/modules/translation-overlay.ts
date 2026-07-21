@@ -998,6 +998,82 @@ export class TranslationOverlayManager {
     document.head.appendChild(style);
     return style;
   }
+
+  // ============================================
+  // PDF导出模块集成方法
+  // ============================================
+
+  /** 获取指定图片的所有覆盖层DOM元素 */
+  getOverlaysForImage(imageElement: HTMLImageElement): HTMLElement[] {
+    const container = this.containers.get(imageElement);
+    if (!container) return [];
+
+    const result: HTMLElement[] = [];
+    this.overlays.forEach((overlay) => {
+      if (container.contains(overlay.element)) {
+        result.push(overlay.element);
+      }
+    });
+    return result;
+  }
+
+  /** 获取所有已翻译图片元素 */
+  getAllTranslatedImages(): HTMLImageElement[] {
+    return Array.from(this.containers.keys());
+  }
+
+  /** 获取指定图片的覆盖层容器元素 */
+  getContainerForImage(imageElement: HTMLImageElement): HTMLElement | undefined {
+    return this.containers.get(imageElement);
+  }
+
+  /** 重新渲染指定图片的翻译（从缓存的MergedDialog数据恢复原版） */
+  rerenderFromCache(imageElement: HTMLImageElement, dialogs: any[]): void {
+    this.removeOverlaysForImage(imageElement);
+    this.renderMergedDialogs(imageElement, dialogs, {
+      horizontalText: false,
+      fontSize: this.baseFontSize,
+      background: '#FFFFFF',
+      backgroundOpacity: 0.88,
+      padding: 4
+    });
+  }
+
+  /** 收集当前所有覆盖层的快照数据（位置+文字+样式） */
+  collectOverlaySnapshots(imageElement: HTMLImageElement): OverlaySnapshot[] {
+    const container = this.containers.get(imageElement);
+    if (!container) return [];
+
+    const snapshots: OverlaySnapshot[] = [];
+    this.overlays.forEach((overlay) => {
+      if (container.contains(overlay.element)) {
+        const style = overlay.element.style;
+        snapshots.push({
+          id: overlay.id,
+          text: overlay.element.textContent || '',
+          left: style.left,
+          top: style.top,
+          width: style.width,
+          height: style.height,
+          fontSize: style.fontSize,
+          writingMode: style.writingMode,
+        });
+      }
+    });
+    return snapshots;
+  }
+}
+
+/** 覆盖层快照（用于持久化用户编辑） */
+export interface OverlaySnapshot {
+  id: string;
+  text: string;
+  left: string;
+  top: string;
+  width: string;
+  height: string;
+  fontSize: string;
+  writingMode: string;
 }
 
 export interface OverlayStyle {
