@@ -860,14 +860,15 @@ export class PDFExporter {
     toolbar.className = 'ml-overlay-edit-toolbar';
     toolbar.style.cssText = `
       position: fixed;
-      display: flex; gap: 4px; justify-content: center; align-items: center;
+      display: flex; flex-direction: column; gap: 4px; align-items: stretch;
       z-index: 2147483646; pointer-events: auto; white-space: nowrap;
+      width: 130px;
     `;
 
     // 字体大小输入
     const fontSizeGroup = document.createElement('div');
     fontSizeGroup.style.cssText = `
-      display: flex; align-items: center; gap: 2px;
+      display: flex; align-items: center; justify-content: space-between; gap: 2px;
       background: rgba(0,0,0,0.75); border-radius: 4px; padding: 2px 6px;
     `;
     const fontSizeLabel = document.createElement('span');
@@ -904,7 +905,7 @@ export class PDFExporter {
     // 透明度滑块组
     const opacityGroup = document.createElement('div');
     opacityGroup.style.cssText = `
-      display: flex; align-items: center; gap: 2px;
+      display: flex; align-items: center; justify-content: space-between; gap: 2px;
       background: rgba(0,0,0,0.75); border-radius: 4px; padding: 2px 6px;
     `;
     const opacityLabel = document.createElement('span');
@@ -933,13 +934,14 @@ export class PDFExporter {
     opacityGroup.appendChild(opacityValueSpan);
 
     // 透明度变化 → 立刻更新 overlay + 记录
+    // 🔧 始终固定背景为白色 rgba(255,255,255,x)，仅修改 alpha 通道。
+    //     之前用 regex 从 DOM 回读再替换 alpha 的方案存在浏览器格式归一化风险
+    //     （如 rgb(255,255,255) 缺 alpha / rgba(255 255 255 / 0.88) 现代语法），
+    //     匹配失败时背景会残留错误的颜色。
     const updateOpacity = () => {
       const newOpacity = parseInt(opacityInput.value, 10) / 100;
       if (isNaN(newOpacity)) return;
-      // 修改 overlay 的 background-color
-      const currentBg = overlay.style.backgroundColor || 'rgba(255, 255, 255, 0.88)';
-      const newBg = currentBg.replace(/rgba?\((\d+),\s*(\d+),\s*(\d+),?\s*[\d.]+\)/, `rgba($1,$2,$3,${newOpacity.toFixed(2)})`);
-      overlay.style.backgroundColor = newBg;
+      overlay.style.backgroundColor = `rgba(255, 255, 255, ${newOpacity.toFixed(2)})`;
       this.customOpacities.set(overlay.id, newOpacity);
       opacityValueSpan.textContent = `${Math.round(newOpacity * 100)}%`;
       this.callbacks.onSaveEdits('', []);
@@ -963,7 +965,7 @@ export class PDFExporter {
     const btnDelete = document.createElement('button');
     btnDelete.textContent = '删除';
     btnDelete.style.cssText = `
-      padding: 3px 10px; font-size: 12px;
+      padding: 4px 10px; font-size: 12px; width: 100%;
       background: rgba(255,50,50,0.85); color: #fff;
       border: none; border-radius: 4px; cursor: pointer;
       pointer-events: auto; white-space: nowrap;
@@ -986,7 +988,7 @@ export class PDFExporter {
     const btnDone = document.createElement('button');
     btnDone.textContent = '确认';
     btnDone.style.cssText = `
-      padding: 3px 10px; font-size: 12px;
+      padding: 4px 10px; font-size: 12px; width: 100%;
       background: rgba(102,126,234,0.85); color: #fff;
       border: none; border-radius: 4px; cursor: pointer;
       pointer-events: auto; white-space: nowrap;
@@ -1015,7 +1017,7 @@ export class PDFExporter {
 
   private _toolbarPositionUpdater: (() => void) | null = null;
 
-  /** 更新工具栏位置（保持在overlay正下方） */
+  /** 更新工具栏位置（保持在overlay正下方，若overlay位于视口下1/4则翻转到上方） */
   private updateToolbarPosition(overlay: HTMLElement): void {
     if (!this.editingToolbar) return;
     const rect = overlay.getBoundingClientRect();
@@ -1024,7 +1026,21 @@ export class PDFExporter {
       return;
     }
     this.editingToolbar.style.display = 'flex';
-    this.editingToolbar.style.top = `${rect.bottom + 4}px`;
+
+    // 🔧 检测覆盖层是否位于视口的下 1/4：若中心点在底 1/4，工具栏翻到上方，避免被裁出屏幕
+    const viewportH = window.innerHeight;
+    const overlayCenterY = (rect.top + rect.bottom) / 2;
+    const isBottomQuarter = overlayCenterY > viewportH * 0.75;
+
+    if (isBottomQuarter) {
+      // 工具栏放在覆盖层上方：bottom = 视口底部 - 覆盖层顶 + 4px 间距
+      const toolbarH = this.editingToolbar.offsetHeight || 110; // 回退估算高度
+      this.editingToolbar.style.top = '';
+      this.editingToolbar.style.bottom = `${viewportH - rect.top + 4}px`;
+    } else {
+      this.editingToolbar.style.top = `${rect.bottom + 4}px`;
+      this.editingToolbar.style.bottom = '';
+    }
     this.editingToolbar.style.left = `${Math.max(4, rect.left)}px`;
   }
 
