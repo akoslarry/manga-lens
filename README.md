@@ -114,7 +114,7 @@ npm run build   # 构建生产版本
 | 配置项 | 说明 | 必填 |
 |--------|------|------|
 | **翻译开关** | 开启/关闭翻译功能 | 是 |
-| **DeepSeek API Key** | 翻译 API 密钥 | 是（支持环境变量 `DS_API_KEY`） |
+| **DeepSeek API Key** | 翻译 API 密钥 | 是（支持环境变量 `DEEPSEEK_API_KEY`） |
 | **腾讯云 SecretId** | OCR API 身份标识 | 是 |
 | **腾讯云 SecretKey** | OCR API 密钥 | 是 |
 | **OCR 模式** | 直接 API（腾讯云 OCR） | 是 |
@@ -133,7 +133,7 @@ npm run build   # 构建生产版本
 
 1. 访问 [DeepSeek 控制台](https://platform.deepseek.com/api_keys)
 2. 创建 API Key
-3. 将 Key 填入扩展配置，或设置环境变量 `DS_API_KEY`
+3. 将 Key 填入扩展配置，或设置环境变量 `DEEPSEEK_API_KEY`
 
 ---
 

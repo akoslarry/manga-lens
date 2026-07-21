@@ -200,7 +200,7 @@ export class BatchTranslator {
   }
 
   /**
-   * 批量翻译多段对话
+   * 批量翻译多段对话（带自动重试）
    * 
    * @param items 需要翻译的对话列表
    * @returns 翻译结果
@@ -214,60 +214,88 @@ export class BatchTranslator {
 
     console.log(`[BatchTranslator] 开始批量翻译 ${items.length} 段对话...`);
 
-    try {
-      // 调用 DeepSeek API
-      const response = await this.callDeepSeekAPI(items);
-      
-      // 解析响应
-      const translations = parseTranslationResponse(response.content, items.map(i => i.id));
-      
-      // 构建结果
-      const resultItems: DialogTranslationItem[] = items.map(item => {
-        const translated = translations.get(item.id);
-        if (translated) {
-          return {
-            id: item.id,
-            originalText: item.text,
-            translatedText: translated,
-            success: true
-          };
-        } else {
-          return {
-            id: item.id,
-            originalText: item.text,
-            success: false,
-            error: '响应中未找到对应编号的翻译'
-          };
+    const MAX_RETRIES = 3;
+    let lastResult: BatchTranslationResult | null = null;
+
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        // 调用 DeepSeek API
+        const response = await this.callDeepSeekAPI(items);
+        
+        // 解析响应
+        const translations = parseTranslationResponse(response.content, items.map(i => i.id));
+        
+        // 构建结果
+        const resultItems: DialogTranslationItem[] = items.map(item => {
+          const translated = translations.get(item.id);
+          if (translated) {
+            return {
+              id: item.id,
+              originalText: item.text,
+              translatedText: translated,
+              success: true
+            };
+          } else {
+            return {
+              id: item.id,
+              originalText: item.text,
+              success: false,
+              error: '响应中未找到对应编号的翻译'
+            };
+          }
+        });
+
+        const successCount = resultItems.filter(r => r.success).length;
+        const failureCount = resultItems.filter(r => !r.success).length;
+
+        lastResult = {
+          items: resultItems,
+          successCount,
+          failureCount,
+          requestId: response.requestId
+        };
+
+        // 如果全部成功，直接返回
+        if (successCount > 0) {
+          console.log(`[BatchTranslator] 翻译完成: ${successCount} 成功, ${failureCount} 失败`);
+          return lastResult;
         }
-      });
 
-      const successCount = resultItems.filter(r => r.success).length;
-      const failureCount = resultItems.filter(r => !r.success).length;
+        // 全部失败 → 重试
+        if (attempt < MAX_RETRIES) {
+          console.warn(`[BatchTranslator] ⚠️ 全部 ${items.length} 条翻译失败（响应长度: ${response.content.length}），第 ${attempt} 次重试...`);
+          await new Promise(resolve => setTimeout(resolve, 1000)); // 重试前等待1秒
+        }
 
-      console.log(`[BatchTranslator] 翻译完成: ${successCount} 成功, ${failureCount} 失败`);
-
-      return {
-        items: resultItems,
-        successCount,
-        failureCount,
-        requestId: response.requestId
-      };
-
-    } catch (error) {
-      console.error('[BatchTranslator] 批量翻译失败:', error);
-      
-      // 失败时，所有条目都标记为失败，保留原文
-      return {
-        items: items.map(item => ({
-          id: item.id,
-          originalText: item.text,
-          success: false,
-          error: error instanceof Error ? error.message : '未知错误'
-        })),
-        successCount: 0,
-        failureCount: items.length
-      };
+      } catch (error) {
+        console.error(`[BatchTranslator] 批量翻译失败 (第 ${attempt}/${MAX_RETRIES} 次):`, error);
+        
+        if (attempt < MAX_RETRIES) {
+          // API 调用异常 → 重试
+          console.warn(`[BatchTranslator] ⚠️ API 调用异常，第 ${attempt} 次重试...`);
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      }
     }
+
+    // 所有重试耗尽后仍全部失败
+    if (lastResult) {
+      console.error(`[BatchTranslator] ❌ 重试 ${MAX_RETRIES} 次后仍然全部失败`);
+      return lastResult;
+    }
+
+    // 兜底：全部标记为失败
+    console.error(`[BatchTranslator] ❌ 所有重试均以异常结束`);
+    return {
+      items: items.map(item => ({
+        id: item.id,
+        originalText: item.text,
+        success: false,
+        error: `重试 ${MAX_RETRIES} 次后仍然失败`
+      })),
+      successCount: 0,
+      failureCount: items.length
+    };
   }
 
   /**

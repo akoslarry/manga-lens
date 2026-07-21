@@ -241,6 +241,23 @@ body {
   background: #e0e0e0;
 }
 
+.btn-tertiary {
+  background: linear-gradient(135deg, #f57c00, #ff9800);
+  color: white;
+  margin-top: 8px;
+  animation: pulse-border 2s infinite;
+}
+
+.btn-tertiary:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(245, 124, 0, 0.4);
+}
+
+@keyframes pulse-border {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(245, 124, 0, 0.3); }
+  50% { box-shadow: 0 0 0 4px rgba(245, 124, 0, 0); }
+}
+
 .btn-sm {
   padding: 6px 10px;
   font-size: 11px;

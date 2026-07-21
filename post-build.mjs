@@ -20,7 +20,8 @@ async function bundleContentScript() {
     target: ['chrome105'],
     platform: 'browser',
     define: {
-      'process.env.NODE_ENV': '"production"'
+      'process.env.NODE_ENV': '"production"',
+      'process.env.DEEPSEEK_API_KEY': JSON.stringify(process.env.DEEPSEEK_API_KEY || '')
     }
   });
   console.log('✓ content-script.js 打包为 IIFE 格式');
@@ -39,7 +40,8 @@ async function bundleBackground() {
     target: ['chrome105'],
     platform: 'browser',
     define: {
-      'process.env.NODE_ENV': '"production"'
+      'process.env.NODE_ENV': '"production"',
+      'process.env.DEEPSEEK_API_KEY': JSON.stringify(process.env.DEEPSEEK_API_KEY || '')
     }
   });
   console.log('✓ background.js 打包为 IIFE 格式');
@@ -57,6 +59,9 @@ async function bundlePopup() {
     sourcemap: false,
     target: ['chrome105'],
     platform: 'browser',
+    define: {
+      'process.env.DEEPSEEK_API_KEY': JSON.stringify(process.env.DEEPSEEK_API_KEY || '')
+    }
   });
   console.log('✓ popup.js 打包为 IIFE 格式');
 }

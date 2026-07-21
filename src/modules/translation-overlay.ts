@@ -38,7 +38,7 @@ export interface RenderConfig {
 
 const DEFAULT_RENDER_CONFIG: Required<RenderConfig> = {
   horizontalText: false,  // 改为竖排（与日语原文一致）
-  fontSize: 17,  // 调大3号 (14 -> 17)
+  fontSize: 22,  // 默认22px
   color: '#000000',
   background: '#FFFFFF',
   backgroundOpacity: 0.88,
@@ -55,15 +55,22 @@ export class TranslationOverlayManager {
   // 图片边界追踪（以图片元素为单位）
   private imageBoundsMap: Map<HTMLImageElement, { width: number; height: number }> = new Map();
 
-  // 字体缩放比例（每张图片独立）
+  // 字体缩放比例（每张图片独立，临时调整）
   private fontScaleMap: Map<HTMLImageElement, number> = new Map();
   private defaultFontScale = 1;
   private fontScaleStep = 0.1;  // 每次调整 10%
   private minFontScale = 0.4;
   private maxFontScale = 3.0;
 
+  // 用户可配置的基础字号（单位 px，持久化到 storage）
+  private baseFontSize = 22;
+
   // 每张图片的控制按钮
   private controlButtonMap: Map<HTMLImageElement, HTMLElement> = new Map();
+
+  // 控制按钮的 position-updater（用于 scroll/resize 时重新计算 fixed 定位）
+  private positionUpdaters: Array<() => void> = [];
+  private scrollListenerBound = false;
 
   /**
    * 创建或获取覆盖层容器（每张图片独立的容器）
@@ -109,21 +116,12 @@ export class TranslationOverlayManager {
 
   /**
    * 创建字体大小控制按钮
+   * 挂载到 document.body 并采用 position: fixed，彻底脱离网站 DOM 层叠上下文
    */
   private createFontControlButton(imageElement: HTMLImageElement, container: HTMLElement): void {
     // 创建整体按钮容器（包含字体控制和显示/隐藏按钮）
     const wrapper = document.createElement('div');
     wrapper.className = 'manga-lens-controls-wrapper';
-    wrapper.style.cssText = `
-      position: absolute;
-      top: 8px;
-      right: 8px;
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      z-index: 1000000;
-      pointer-events: auto;
-    `;
 
     // 字体控制按钮组
     const btnContainer = document.createElement('div');
@@ -164,13 +162,18 @@ export class TranslationOverlayManager {
     // 初始化隐藏状态为显示
     this.hiddenOverlaysMap = this.hiddenOverlaysMap || new Map();
     this.hiddenOverlaysMap.set(imageElement, false);
-    toggleBtn.addEventListener('click', () => this.toggleOverlayVisibility(imageElement, toggleBtn, container));
+    toggleBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      this.toggleOverlayVisibility(imageElement, toggleBtn, container);
+    });
 
     const decreaseBtn = btnContainer.querySelector('.ml-font-decrease')!;
     const increaseBtn = btnContainer.querySelector('.ml-font-increase')!;
     const scaleLabel = btnContainer.querySelector('.ml-font-scale')!;
 
-    decreaseBtn.style.cssText = `
+    // 简化按钮样式（提取为公共方法）
+    const fontBtnStyle = `
       background: rgba(255, 255, 255, 0.2);
       border: none;
       color: white;
@@ -184,23 +187,19 @@ export class TranslationOverlayManager {
       align-items: center;
       justify-content: center;
     `;
-    decreaseBtn.addEventListener('click', () => this.adjustFontScale(imageElement, -1, scaleLabel));
+    decreaseBtn.style.cssText = fontBtnStyle;
+    decreaseBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      this.adjustFontScale(imageElement, -1, scaleLabel);
+    });
 
-    increaseBtn.style.cssText = `
-      background: rgba(255, 255, 255, 0.2);
-      border: none;
-      color: white;
-      width: 24px;
-      height: 24px;
-      border-radius: 50%;
-      cursor: pointer;
-      font-size: 16px;
-      line-height: 1;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    `;
-    increaseBtn.addEventListener('click', () => this.adjustFontScale(imageElement, 1, scaleLabel));
+    increaseBtn.style.cssText = fontBtnStyle;
+    increaseBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      this.adjustFontScale(imageElement, 1, scaleLabel);
+    });
 
     scaleLabel.style.cssText = `
       color: white;
@@ -214,14 +213,66 @@ export class TranslationOverlayManager {
       this.fontScaleMap.set(imageElement, this.defaultFontScale);
     }
 
-    // 组装：wrapper > [toggleBtn, btnContainer]
+    // 组装 wrapper
     wrapper.appendChild(toggleBtn);
     wrapper.appendChild(btnContainer);
 
-    container.parentElement?.appendChild(wrapper);
+    // ============ 核心改动：挂载到 document.body + position: fixed ============
+    // position: fixed 让按钮固定在视口坐标上，脱离网站的层叠上下文
+    // z-index: 2147483647 是 CSS 规范最大安全值，确保按钮在所有网站元素之上
+    // pointer-events: auto 确保按钮始终可点击，不会被父级 pointer-events:none 影响
+
+    /**
+     * 更新 wrapper 的 fixed 定位（根据图片当前视口位置计算）
+     */
+    const updatePosition = () => {
+      if (!document.body.contains(wrapper)) return;
+
+      const imgRect = imageElement.getBoundingClientRect();
+      const isVisible = imgRect.width > 0 && imgRect.height > 0;
+
+      if (!isVisible) {
+        wrapper.style.display = 'none';
+        return;
+      }
+
+      wrapper.style.display = 'flex';
+      wrapper.style.cssText = `
+        position: fixed;
+        top: ${imgRect.top + 8}px;
+        left: ${imgRect.right - 8}px;
+        transform: translateX(-100%);
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        z-index: 2147483647;
+        pointer-events: auto;
+      `;
+    };
+
+    // 注册位置更新器
+    this.positionUpdaters.push(updatePosition);
+
+    // 首次挂载 + 定位
+    document.body.appendChild(wrapper);
+    updatePosition();
+
+    // 确保 scroll/resize 监听只注册一次
+    if (!this.scrollListenerBound) {
+      this.scrollListenerBound = true;
+      window.addEventListener('scroll', this._onScrollResize, { passive: true });
+      window.addEventListener('resize', this._onScrollResize, { passive: true });
+    }
+
     this.controlButtonMap.set(imageElement, wrapper);
+    (wrapper as any).__mlPositionUpdater = updatePosition;
     this.updateFontScaleLabel(imageElement, scaleLabel);
   }
+
+  /** scroll/resize 时统一更新所有按钮位置 */
+  private _onScrollResize = () => {
+    this.positionUpdaters.forEach(fn => fn());
+  };
 
   /**
    * 切换覆盖层显示/隐藏
@@ -250,15 +301,66 @@ export class TranslationOverlayManager {
   }
 
   /**
-   * 调整字体缩放比例
+   * 调整字体缩放比例（仅本次会话生效，不持久化）
    */
   private adjustFontScale(imageElement: HTMLImageElement, direction: number, label: HTMLElement): void {
     let scale = this.fontScaleMap.get(imageElement) || this.defaultFontScale;
     scale += direction * this.fontScaleStep;
     scale = Math.max(this.minFontScale, Math.min(this.maxFontScale, scale));
     this.fontScaleMap.set(imageElement, scale);
+    
     this.updateFontScaleLabel(imageElement, label);
     this.applyFontScaleToOverlays(imageElement);
+  }
+
+  /**
+   * 设置基础字体大小（由 popup 设置界面触发）
+   * 同时更新所有已渲染覆盖层的字体大小
+   */
+  setBaseFontSize(size: number): void {
+    this.baseFontSize = Math.max(10, Math.min(36, size));
+    console.log(`[Overlay] 基础字体大小已更新: ${this.baseFontSize}px`);
+    // 立即应用到所有已渲染的覆盖层
+    this.applyBaseFontSizeToAllOverlays();
+  }
+
+  /**
+   * 将当前 baseFontSize × 各图片 scale 应用到所有已渲染覆盖层
+   */
+  private applyBaseFontSizeToAllOverlays(): void {
+    this.containers.forEach((container, imageElement) => {
+      const scale = this.fontScaleMap.get(imageElement) || this.defaultFontScale;
+      const newFontSize = this.baseFontSize * scale;
+
+      this.overlays.forEach((overlay) => {
+        if (container.contains(overlay.element)) {
+          overlay.element.style.fontSize = `${newFontSize}px`;
+        }
+      });
+    });
+    console.log(`[Overlay] 已更新所有覆盖层字体: baseFontSize=${this.baseFontSize}px`);
+  }
+
+  /**
+   * 获取当前基础字体大小
+   */
+  getBaseFontSize(): number {
+    return this.baseFontSize;
+  }
+
+  /**
+   * 从 chrome.storage.local 加载用户设置的基础字号
+   */
+  async loadSavedFontSize(): Promise<void> {
+    try {
+      const result = await chrome.storage.local.get(['mangaLensFontSize']);
+      if (result.mangaLensFontSize !== undefined) {
+        this.baseFontSize = Math.max(10, Math.min(36, result.mangaLensFontSize));
+        console.log(`[Overlay] 加载已保存字体大小: ${this.baseFontSize}px`);
+      }
+    } catch (e) {
+      // 使用默认值 22px
+    }
   }
 
   /**
@@ -274,8 +376,7 @@ export class TranslationOverlayManager {
    */
   private applyFontScaleToOverlays(imageElement: HTMLImageElement): void {
     const scale = this.fontScaleMap.get(imageElement) || this.defaultFontScale;
-    const baseFontSize = 17;  // 基础字体大小
-    const newFontSize = baseFontSize * scale;
+    const newFontSize = this.baseFontSize * scale;
 
     this.overlays.forEach((overlay, id) => {
       // 只更新属于该图片的覆盖层
@@ -431,6 +532,22 @@ export class TranslationOverlayManager {
       }
     });
     this.containers.clear();
+
+    // 清理所有控制按钮 wrapper（从 document.body 中移除）
+    this.controlButtonMap.forEach((wrapper) => {
+      if (wrapper.parentElement) {
+        wrapper.remove();
+      }
+    });
+    this.controlButtonMap.clear();
+    this.positionUpdaters = [];
+
+    // 移除全局 scroll/resize 监听
+    if (this.scrollListenerBound) {
+      window.removeEventListener('scroll', this._onScrollResize);
+      window.removeEventListener('resize', this._onScrollResize);
+      this.scrollListenerBound = false;
+    }
   }
 
   /**
@@ -443,12 +560,32 @@ export class TranslationOverlayManager {
     }
     this.containers.delete(imageElement);
     
+    // 清理该图片的控制按钮 wrapper（从 document.body 移除）
+    const wrapper = this.controlButtonMap.get(imageElement);
+    if (wrapper) {
+      const updater = (wrapper as any).__mlPositionUpdater;
+      if (updater) {
+        this.positionUpdaters = this.positionUpdaters.filter(fn => fn !== updater);
+      }
+      if (wrapper.parentElement) {
+        wrapper.remove();
+      }
+      this.controlButtonMap.delete(imageElement);
+    }
+
     // 清理该图片相关的覆盖层
     this.overlays.forEach((overlay, id) => {
       if (!document.getElementById(id)) {
         this.overlays.delete(id);
       }
     });
+
+    // 如果没有控制按钮了，移除全局监听
+    if (this.controlButtonMap.size === 0 && this.scrollListenerBound) {
+      window.removeEventListener('scroll', this._onScrollResize);
+      window.removeEventListener('resize', this._onScrollResize);
+      this.scrollListenerBound = false;
+    }
   }
 
   /**
@@ -775,11 +912,10 @@ export class TranslationOverlayManager {
   /**
    * 基于对话信息计算字体大小
    * 
-   * 算法：
-   * 1. 根据原文的平均字符宽度（charWidth）计算每个字符应占的像素
-   * 2. 考虑翻译后字符数与原文的差异
-   * 3. 使用 itemCharWidths 的加权平均作为基准
-   * 4. 确保字体大小在合理范围内
+   * 算法（v2）：
+   * 1. 以用户保存的 baseFontSize 为基准（而非 OCR 原始字符宽度）
+   * 2. 如果译文字符数多于原文，按比例缩小以适应气泡
+   * 3. 确保字体大小在合理范围内（不低于10px，不高于 config.fontSize）
    */
   private calculateFontSizeForDialog(
     dialog: MergedDialog,
@@ -787,47 +923,23 @@ export class TranslationOverlayManager {
     boxWidth: number,
     config: Required<RenderConfig>
   ): number {
-    // 如果没有 charWidth 信息，使用传统方法
-    if (!dialog.charWidth || dialog.charWidth <= 0) {
-      return this.calculateFontSize(boxWidth, config);
-    }
-
     const translatedCharCount = translatedText.length;
     const ocrCharCount = dialog.charCount;
+    const referenceSize = this.baseFontSize;
 
-    // 使用 itemCharWidths 的加权平均计算基准字符宽度
-    let weightedCharWidth = dialog.charWidth;
-    if (dialog.itemCharWidths && dialog.itemCharWidths.length > 0) {
-      const totalChars = dialog.itemCharWidths.reduce((sum, i) => sum + i.charCount, 0);
-      const weightedSum = dialog.itemCharWidths.reduce((sum, i) => sum + i.avgWidth * i.charCount, 0);
-      if (totalChars > 0) {
-        weightedCharWidth = weightedSum / totalChars;
-      }
-    }
-
-    // 计算目标字体大小
-    // 字体大小约为字符宽度的 0.7-0.9 倍（考虑字间距）
-    const baseFontSize = weightedCharWidth * 0.8;
-
-    // 考虑翻译后字符数的影响
-    // 如果翻译后字符更多，需要适当缩小
+    // 如果翻译后字符增多，按比例缩小以保证文字能装进气泡
     if (translatedCharCount > ocrCharCount && ocrCharCount > 0) {
       const scaleFactor = Math.sqrt(ocrCharCount / translatedCharCount);
-      const adjustedFontSize = baseFontSize * scaleFactor;
+      const adjusted = referenceSize * scaleFactor;
+      const finalFontSize = Math.max(10, adjusted);
       
-      // 【修复】降低最小字体限制，增加到14px（原8px→14px，原10px→14px）
-      // 这样可以保证翻译文字清晰可读
-      const finalFontSize = Math.min(config.fontSize, Math.max(14, adjustedFontSize));
-      
-      console.log(`[Overlay] 字体计算: charWidth=${weightedCharWidth.toFixed(1)}, 原文${ocrCharCount}字→译文${translatedCharCount}字, scale=${scaleFactor.toFixed(2)}, 最终=${finalFontSize.toFixed(1)}px`);
+      console.log(`[Overlay] 字体计算: baseFontSize=${referenceSize}px, 原文${ocrCharCount}字→译文${translatedCharCount}字, scale=${scaleFactor.toFixed(2)}, 最终=${finalFontSize.toFixed(1)}px`);
       return finalFontSize;
     }
 
-    // 翻译后字符数不变或减少，保持基准大小（提高到14px）
-    const finalFontSize = Math.min(config.fontSize, Math.max(14, baseFontSize));
-    
-    console.log(`[Overlay] 字体计算: charWidth=${weightedCharWidth.toFixed(1)}, 原文${ocrCharCount}字→译文${translatedCharCount}字, 最终=${finalFontSize.toFixed(1)}px`);
-    return finalFontSize;
+    // 译文不长于原文，直接使用用户设置的基准字体大小
+    console.log(`[Overlay] 字体计算: baseFontSize=${referenceSize}px, 原文${ocrCharCount}字→译文${translatedCharCount}字, 最终=${referenceSize}px`);
+    return referenceSize;
   }
 
   /**

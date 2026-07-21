@@ -14,8 +14,9 @@ import { imageDetector, type DetectedImage } from './modules/image-detector';
 import { mangaOCR } from './modules/ocr-engine';
 import { translator } from './modules/translator';
 import { overlayManager } from './modules/translation-overlay';
-import { DialogMerger, type OCRTextItem } from './modules/dialog-merger';
+import { DialogMerger, type OCRTextItem, type MergedDialog } from './modules/dialog-merger';
 import { BatchTranslator } from './modules/batch-translator';
+import { translationCache } from './modules/translation-cache';
 
 // State management
 interface MangaLensState {
@@ -59,23 +60,25 @@ interface TranslationTask {
 }
 
 // Queue configuration
-const OCR_CONCURRENCY = 3; // Max 3 concurrent OCR
-const TRANSLATION_CONCURRENCY = 5; // Max 5 concurrent translations
-const TRANSLATION_QUEUE_LIMIT = TRANSLATION_CONCURRENCY * 2; // 10: pause OCR when translation queue reaches this limit
+const OCR_CONCURRENCY = 9; // 腾讯OCR QPS上限10，程序并发9留有余量
+const TRANSLATION_CONCURRENCY = 999; // DeepSeek并发上限500，实际使用远低于此，不设限制
 
 const translationQueue: TranslationTask[] = [];
 let ocrQueue: OCRTask[] = [];
 let activeOCRs = 0;
 let activeTranslations = 0;
-let isOCRPaused = false; // Flag to track if OCR is paused due to translation queue full
+
+// 单次翻译图片上限控制
+let maxImagesPerBatch = 30; // 默认单次翻译上限
+let translationCompletedCount = 0; // 本次已翻译图片计数
+let isTranslationPaused = false; // 是否因达到上限而暂停
 
 /**
  * Process next OCR task
  */
 async function processNextOCR(): Promise<void> {
-  // Check if OCR is paused due to translation queue being full
-  if (isOCRPaused) {
-    console.log(`[MangaLens] OCR paused: translation queue (${translationQueue.length}) at limit (${TRANSLATION_QUEUE_LIMIT})`);
+  // 检查是否因达到单次上限而暂停全部处理
+  if (isTranslationPaused) {
     return;
   }
 
@@ -109,23 +112,17 @@ async function processNextOCR(): Promise<void> {
       reject: task.reject
     });
 
-    // Check if translation queue reached limit after adding this task
-    if (translationQueue.length >= TRANSLATION_QUEUE_LIMIT) {
-      isOCRPaused = true;
-      console.log(`[MangaLens] ⚠️ OCR paused: translation queue reached limit (${translationQueue.length}/${TRANSLATION_QUEUE_LIMIT})`);
-    }
-
     task.resolve({ boxes: ocrResult.boxes, imageSrc: task.image.src, rotationAngle: ocrResult.rotationAngle, hasRotation: ocrResult.hasRotation });
     console.log(`[MangaLens] OCR complete, added to translation queue. Queue length: ${translationQueue.length}`);
 
-    // Trigger translation queue processing
+    // Trigger translation queue processing (无并发限制，立即启动翻译)
     processNextTranslation();
 
   } catch (error) {
     task.reject(error instanceof Error ? error : new Error(String(error)));
   } finally {
     activeOCRs--;
-    // Continue processing next OCR (if not paused)
+    // Continue processing next OCR
     processNextOCR();
   }
 }
@@ -134,6 +131,11 @@ async function processNextOCR(): Promise<void> {
  * Process next translation task (supports concurrency)
  */
 async function processNextTranslation(): Promise<void> {
+  // 检查是否因达到单次上限而暂停
+  if (isTranslationPaused) {
+    return;
+  }
+
   // Check concurrency limit
   if (translationQueue.length === 0 || activeTranslations >= TRANSLATION_CONCURRENCY) {
     return;
@@ -149,33 +151,64 @@ async function processNextTranslation(): Promise<void> {
     console.log(`[MangaLens] Starting translation: ${task.image.src.substring(0, 50)}... (image element src: ${task.image.element?.src?.substring(0, 50)})`);
     await translateAndRender(task.image, task.ocrResult);
     task.resolve();
+
+    // 翻译完成计数 +1，检查是否达到单次上限
+    translationCompletedCount++;
+    console.log(`[MangaLens] 翻译完成计数: ${translationCompletedCount}/${maxImagesPerBatch}`);
+
+    if (translationCompletedCount >= maxImagesPerBatch) {
+      isTranslationPaused = true;
+      console.log(`[MangaLens] ⚠️ 已达到单次翻译上限 (${maxImagesPerBatch}张)，暂停处理`);
+      showBatchLimitPopup();
+    }
   } catch (error) {
     task.reject(error instanceof Error ? error : new Error(String(error)));
   } finally {
     activeTranslations--;
-    
-    // Check if we should resume OCR processing
-    // Resume OCR when translation queue drops below the limit
-    if (isOCRPaused && translationQueue.length < TRANSLATION_QUEUE_LIMIT) {
-      isOCRPaused = false;
-      console.log(`[MangaLens] ✅ OCR resumed: translation queue (${translationQueue.length}) below limit (${TRANSLATION_QUEUE_LIMIT})`);
-      // Trigger OCR processing
-      processNextOCR();
-    }
-    
     // Continue processing next translation
     processNextTranslation();
   }
 }
 
 /**
- * Add image to OCR queue
+ * Add image to OCR queue (cache check BEFORE OCR to save API calls)
  */
 function enqueueImage(image: DetectedImage): Promise<{ boxes: any[]; imageSrc: string }> {
-  return new Promise((resolve, reject) => {
-    ocrQueue.push({ image, resolve, reject });
-    processNextOCR();
-  });
+  const imageSrc = image.src;
+
+  // 入口层缓存拦截：在入队之前就检查缓存，命中则直接渲染，跳过 OCR 和翻译
+  const checkCacheThenEnqueue = async (): Promise<{ boxes: any[]; imageSrc: string }> => {
+    // 1. 已处理过的图片直接跳过
+    if (state.processedImages.has(imageSrc)) {
+      return { boxes: [], imageSrc };
+    }
+
+    // 2. 缓存开关开启时，检查本地翻译缓存
+    if (translationCache.isEnabled()) {
+      const cachedDialogs = await translationCache.get(imageSrc);
+      if (cachedDialogs) {
+        console.log(`[MangaLens] 📦 从缓存加载翻译（跳过OCR）: ${imageSrc.substring(0, 50)}... (${cachedDialogs.length} 个对话)`);
+        overlayManager.renderMergedDialogs(image.element, cachedDialogs, {
+          horizontalText: false,
+          fontSize: overlayManager.getBaseFontSize(),
+          background: '#FFFFFF',
+          backgroundOpacity: 0.88,
+          padding: 4
+        });
+        state.processedImages.add(imageSrc);
+        updatePopupStatus();
+        return { boxes: [], imageSrc };
+      }
+    }
+
+    // 3. 缓存未命中 → 进入 OCR 队列
+    return new Promise((resolve, reject) => {
+      ocrQueue.push({ image, resolve, reject });
+      processNextOCR();
+    });
+  };
+
+  return checkCacheThenEnqueue();
 }
 
 /**
@@ -190,6 +223,22 @@ async function translateAndRender(
   // Skip already processed images
   if (state.processedImages.has(imageSrc)) {
     console.log(`[MangaLens] Skipping already processed image: ${imageSrc}`);
+    return;
+  }
+
+  // 检查本地缓存
+  const cachedDialogs = await translationCache.get(imageSrc);
+  if (cachedDialogs) {
+    console.log(`[MangaLens] 📦 从缓存加载翻译: ${imageSrc.substring(0, 50)}... (${cachedDialogs.length} 个对话)`);
+    overlayManager.renderMergedDialogs(image.element, cachedDialogs, {
+      horizontalText: false,
+      fontSize: overlayManager.getBaseFontSize(),
+      background: '#FFFFFF',
+      backgroundOpacity: 0.88,
+      padding: 4
+    });
+    state.processedImages.add(imageSrc);
+    updatePopupStatus();
     return;
   }
 
@@ -288,7 +337,7 @@ async function translateAndRender(
 
     overlayManager.renderMergedDialogs(image.element, mergedDialogs, {
       horizontalText: false,
-      fontSize: 14,
+      fontSize: overlayManager.getBaseFontSize(),
       background: '#FFFFFF',
       backgroundOpacity: 0.88,
       padding: 4
@@ -296,6 +345,9 @@ async function translateAndRender(
 
     // Mark as processed
     state.processedImages.add(imageSrc);
+
+    // 保存翻译结果到本地缓存
+    await translationCache.set(imageSrc, mergedDialogs);
 
     console.log(`[MangaLens] ✅ Complete! Translated ${translationResult.successCount} dialog segments`);
 
@@ -331,6 +383,22 @@ async function processImage(image: DetectedImage): Promise<void> {
   // Skip already processed images
   if (state.processedImages.has(imageSrc)) {
     console.log(`[MangaLens] Skipping already processed image: ${imageSrc}`);
+    return;
+  }
+
+  // 检查本地缓存
+  const cachedDialogs = await translationCache.get(imageSrc);
+  if (cachedDialogs) {
+    console.log(`[MangaLens] 📦 从缓存加载翻译: ${imageSrc.substring(0, 50)}... (${cachedDialogs.length} 个对话)`);
+    overlayManager.renderMergedDialogs(image.element, cachedDialogs, {
+      horizontalText: false,
+      fontSize: overlayManager.getBaseFontSize(),
+      background: '#FFFFFF',
+      backgroundOpacity: 0.88,
+      padding: 4
+    });
+    state.processedImages.add(imageSrc);
+    updatePopupStatus();
     return;
   }
 
@@ -430,7 +498,7 @@ async function processImage(image: DetectedImage): Promise<void> {
     
     overlayManager.renderMergedDialogs(image.element, mergedDialogs, {
       horizontalText: false,  // Vertical text (consistent with Japanese original)
-      fontSize: 14,
+      fontSize: overlayManager.getBaseFontSize(),
       background: '#FFFFFF',
       backgroundOpacity: 0.88,
       padding: 4
@@ -438,6 +506,9 @@ async function processImage(image: DetectedImage): Promise<void> {
 
     // Mark as processed
     state.processedImages.add(imageSrc);
+
+    // 保存翻译结果到本地缓存
+    await translationCache.set(imageSrc, mergedDialogs);
 
     hideLoading();
     console.log(`[MangaLens] ✅ Complete! Translated ${translationResult.successCount} dialog segments`);
@@ -449,18 +520,121 @@ async function processImage(image: DetectedImage): Promise<void> {
     console.error('[MangaLens] ❌ Failed to process image:', error);
   }
 }
-
-// Update popup status
 async function updatePopupStatus() {
   try {
     chrome.runtime.sendMessage({
       type: 'UPDATE_STATUS',
       processedCount: state.processedImages.size,
-      cacheSize: translator.getCacheSize()
+      cacheSize: translator.getCacheSize(),
+      batchCount: translationCompletedCount,
+      batchLimit: maxImagesPerBatch,
+      isPaused: isTranslationPaused
     });
   } catch (e) {
     // Ignore when popup is not open
   }
+}
+
+/**
+ * 显示右下角"达到单次限制"弹窗
+ */
+function showBatchLimitPopup(): void {
+  // 移除旧弹窗
+  const existing = document.getElementById('manga-lens-batch-limit-popup');
+  if (existing) existing.remove();
+
+  const popup = document.createElement('div');
+  popup.id = 'manga-lens-batch-limit-popup';
+  popup.innerHTML = `
+    <style>
+      #manga-lens-batch-limit-popup {
+        position: fixed;
+        bottom: 24px;
+        right: 24px;
+        z-index: 2147483647;
+        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+        border: 1px solid rgba(102, 126, 234, 0.4);
+        border-radius: 16px;
+        padding: 20px 24px;
+        color: #e0e0e0;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(102, 126, 234, 0.2);
+        animation: mml-slide-up 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+        max-width: 360px;
+      }
+      @keyframes mml-slide-up {
+        from { opacity: 0; transform: translateY(20px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+      #manga-lens-batch-limit-popup .mml-title {
+        font-size: 15px;
+        font-weight: 600;
+        margin-bottom: 8px;
+        color: #fff;
+      }
+      #manga-lens-batch-limit-popup .mml-desc {
+        font-size: 13px;
+        color: #a0a0b8;
+        margin-bottom: 16px;
+        line-height: 1.5;
+      }
+      #manga-lens-batch-limit-popup .mml-buttons {
+        display: flex;
+        gap: 10px;
+      }
+      #manga-lens-batch-limit-popup .mml-btn {
+        flex: 1;
+        padding: 10px 0;
+        border: none;
+        border-radius: 10px;
+        font-size: 14px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.2s;
+      }
+      .mml-btn-continue {
+        background: linear-gradient(135deg, #667eea, #764ba2);
+        color: #fff;
+      }
+      .mml-btn-continue:hover { opacity: 0.9; transform: translateY(-1px); }
+      .mml-btn-pause {
+        background: rgba(255,255,255,0.08);
+        color: #a0a0b8;
+        border: 1px solid rgba(255,255,255,0.12) !important;
+      }
+      .mml-btn-pause:hover { background: rgba(255,255,255,0.14); }
+    </style>
+    <div class="mml-title">📊 已达到单次翻译上限</div>
+    <div class="mml-desc">已翻译 <strong style="color:#667eea">${translationCompletedCount}</strong> 张图片（上限 ${maxImagesPerBatch} 张）。是否继续识别？</div>
+    <div class="mml-buttons">
+      <button class="mml-btn mml-btn-continue" id="mml-btn-continue">✅ 是，继续翻译</button>
+      <button class="mml-btn mml-btn-pause" id="mml-btn-pause">⏸️ 否，暂停翻译</button>
+    </div>
+  `;
+  document.body.appendChild(popup);
+
+  // 绑定按钮事件
+  document.getElementById('mml-btn-continue')?.addEventListener('click', () => {
+    resumeTranslation();
+    popup.remove();
+  });
+  document.getElementById('mml-btn-pause')?.addEventListener('click', () => {
+    popup.remove();
+    updatePopupStatus();
+  });
+}
+
+/**
+ * 继续翻译：重置计数，取消暂停，恢复队列处理
+ */
+function resumeTranslation(): void {
+  translationCompletedCount = 0;
+  isTranslationPaused = false;
+  console.log('[MangaLens] ✅ 翻译已恢复，计数已清零');
+  // 恢复 OCR 和翻译队列处理
+  processNextOCR();
+  processNextTranslation();
+  updatePopupStatus();
 }
 
 // Process all images on page (using queue system)
@@ -516,14 +690,14 @@ async function selectImageManually(): Promise<void> {
     if (image) {
       console.log('[MangaLens] User selected image, adding to OCR queue...');
       
-      // 【修改】手动选择时：先清除该图片的 processed 状态，允许重新翻译
+      // 【修改】手动选择时：先清除该图片的 processed 状态和缓存，允许重新翻译
       const imageSrc = image.src;
       const wasProcessed = state.processedImages.has(imageSrc);
       if (wasProcessed) {
-        console.log('[MangaLens] Manual re-selection: clearing previous translation state');
+        console.log('[MangaLens] Manual re-selection: clearing previous translation state and cache');
         state.processedImages.delete(imageSrc);
-        // 清除该图片的覆盖层
         overlayManager.removeOverlaysForImage(image.element);
+        await translationCache.delete(imageSrc);
       }
       
       enqueueImage(image);
@@ -551,10 +725,10 @@ async function initialize(): Promise<void> {
     // 2. Load configuration from storage
     console.log('[MangaLens] Step 2/3: Loading configuration...');
     const stored = await chrome.storage.local.get(['apiKey', 'apiSecret', 'deepseekApiKey', 'isEnabled']);
-    if (stored.apiKey || stored.deepseekApiKey) {
+    if (stored.apiKey || stored.deepseekApiKey || process.env.DEEPSEEK_API_KEY) {
       state.apiKey = stored.apiKey || '';
       state.apiSecret = stored.apiSecret || '';
-      state.deepseekApiKey = stored.deepseekApiKey || '';
+      state.deepseekApiKey = stored.deepseekApiKey || process.env.DEEPSEEK_API_KEY || '';
       translator.configure({
         deepseekApiKey: state.deepseekApiKey,
         tencentSecretId: state.apiKey,
@@ -566,7 +740,13 @@ async function initialize(): Promise<void> {
     }
     state.isEnabled = stored.isEnabled !== false;
 
-    // 3. Process images on current page (delayed execution to ensure page fully loaded)
+    // 3. 加载已保存的字体大小设置
+    await overlayManager.loadSavedFontSize();
+
+    // 4. 加载缓存开关状态
+    await translationCache.loadEnabledState();
+
+    // 5. Process images on current page (delayed execution to ensure page fully loaded)
     console.log('[MangaLens] Step 3/3: Scanning page for images...');
     
     // Delay 1 second execution to wait for images to fully load
@@ -749,7 +929,8 @@ chrome.runtime.onMessage.addListener(async (message, sender, sendResponse) => {
       state.processedImages.clear();
       ocrQueue = []; // Clear OCR queue
       translationQueue.length = 0; // Clear translation queue
-      isOCRPaused = false; // Reset OCR pause flag
+      isTranslationPaused = false; // Reset pause flag
+      translationCompletedCount = 0; // Reset batch counter
       overlayManager.removeAllOverlays();
       processAllImages();
       sendResponse({ success: true });
@@ -757,6 +938,12 @@ chrome.runtime.onMessage.addListener(async (message, sender, sendResponse) => {
 
     case 'SELECT_IMAGE':
       selectImageManually();
+      sendResponse({ success: true });
+      break;
+
+    case 'UPDATE_FONT_SIZE':
+      overlayManager.setBaseFontSize(message.fontSize);
+      console.log(`[MangaLens] 字体大小已更新: ${message.fontSize}px`);
       sendResponse({ success: true });
       break;
 
@@ -769,8 +956,9 @@ chrome.runtime.onMessage.addListener(async (message, sender, sendResponse) => {
           for (const img of images) {
             if (img.src === message.imageSrc) {
               console.log('[MangaLens] Re-rendering image:', message.imageSrc);
-              // Clear processed mark, re-process
+              // Clear processed mark & cache, re-process
               state.processedImages.delete(message.imageSrc);
+              await translationCache.delete(message.imageSrc);
               await processImage({ element: img, src: img.src });
               break;
             }
@@ -782,13 +970,37 @@ chrome.runtime.onMessage.addListener(async (message, sender, sendResponse) => {
       sendResponse({ success: true });
       break;
 
-    case 'GET_STATUS':
-      sendResponse({
-        isEnabled: state.isEnabled,
-        processedCount: state.processedImages.size,
-        cacheSize: translator.getCacheSize()
-      });
+    case 'TOGGLE_CACHE':
+      await translationCache.setEnabled(message.enabled);
+      sendResponse({ success: true });
       break;
+
+    case 'CONTINUE_TRANSLATION':
+      resumeTranslation();
+      sendResponse({ success: true });
+      break;
+
+    case 'UPDATE_BATCH_LIMIT':
+      maxImagesPerBatch = Math.max(1, Math.min(100, message.limit || 30));
+      console.log(`[MangaLens] 单次翻译上限已更新: ${maxImagesPerBatch}`);
+      sendResponse({ success: true });
+      break;
+
+    case 'GET_STATUS':
+      (async () => {
+        const localCacheSize = await translationCache.getSize();
+        sendResponse({
+          isEnabled: state.isEnabled,
+          processedCount: state.processedImages.size,
+          cacheSize: translator.getCacheSize(),
+          localCacheSize,
+          cacheEnabled: translationCache.isEnabled(),
+          batchCount: translationCompletedCount,
+          batchLimit: maxImagesPerBatch,
+          isPaused: isTranslationPaused
+        });
+      })();
+      return true; // keep channel open for async
   }
   return true;
 });

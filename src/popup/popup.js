@@ -23,6 +23,20 @@ const directActionSelect = document.getElementById('directAction');
 const btnSaveDirect = document.getElementById('btnSaveDirect');
 const btnTestDirect = document.getElementById('btnTestDirect');
 
+// 本地缓存
+const toggleCacheEnabled = document.getElementById('toggleCacheEnabled');
+const localCacheCount = document.getElementById('localCacheCount');
+
+// 字体设置
+const fontSizeInput = document.getElementById('fontSize');
+const btnSaveFontSize = document.getElementById('btnSaveFontSize');
+
+// 单次翻译上限
+const batchLimitInput = document.getElementById('batchLimit');
+const btnSaveBatchLimit = document.getElementById('btnSaveBatchLimit');
+const btnContinueTranslation = document.getElementById('btnContinueTranslation');
+const batchProgress = document.getElementById('batchProgress');
+
 // 显示提示
 function showAlert(message, type = 'success') {
   alertContainer.innerHTML = `<div class="alert alert-${type}">${message}</div>`;
@@ -40,6 +54,22 @@ async function updateStatus() {
       if (response) {
         processedCount.textContent = response.processedCount || 0;
         cacheCount.textContent = response.cacheSize || 0;
+        if (response.localCacheSize !== undefined) {
+          localCacheCount.textContent = response.localCacheSize;
+        }
+        if (response.cacheEnabled !== undefined) {
+          toggleCacheEnabled.checked = response.cacheEnabled;
+        }
+        // 显示翻译进度
+        if (response.batchCount !== undefined) {
+          batchProgress.textContent = `${response.batchCount}/${response.batchLimit || 30}`;
+        }
+        // 显示/隐藏继续翻译按钮
+        if (response.isPaused) {
+          btnContinueTranslation.style.display = 'block';
+        } else {
+          btnContinueTranslation.style.display = 'none';
+        }
       }
     }
   } catch (error) {
@@ -51,7 +81,8 @@ async function updateStatus() {
 async function loadConfig() {
   const result = await chrome.storage.local.get([
     'apiKey', 'apiSecret', 'deepseekApiKey', 'isEnabled',
-    'tencentSecretId', 'tencentSecretKey', 'directRegion', 'directAction'
+    'tencentSecretId', 'tencentSecretKey', 'directRegion', 'directAction',
+    'mangaLensFontSize', 'mangaLensBatchLimit'
   ]);
   
   if (result.deepseekApiKey) {
@@ -71,6 +102,16 @@ async function loadConfig() {
   }
   if (result.directAction) {
     directActionSelect.value = result.directAction;
+  }
+  
+  // 字体大小设置
+  if (result.mangaLensFontSize) {
+    fontSizeInput.value = result.mangaLensFontSize;
+  }
+
+  // 单次翻译上限
+  if (result.mangaLensBatchLimit) {
+    batchLimitInput.value = result.mangaLensBatchLimit;
   }
 }
 
@@ -92,7 +133,7 @@ btnSave.addEventListener('click', async () => {
 
   // 允许不填（使用环境变量），但至少提示
   if (!deepseekKey) {
-    showAlert('⚠️ DeepSeek API Key 为空，将尝试使用环境变量 DS_API_KEY', 'warning');
+    showAlert('⚠️ DeepSeek API Key 为空，将尝试使用环境变量 DEEPSEEK_API_KEY', 'warning');
   }
 
   // 保存到 storage
@@ -118,10 +159,10 @@ btnSave.addEventListener('click', async () => {
 
 // 测试连接
 btnTest.addEventListener('click', async () => {
-  const deepseekKey = deepseekKeyInput.value.trim();
+  const deepseekKey = deepseekKeyInput.value.trim() || process.env.DEEPSEEK_API_KEY;
 
   if (!deepseekKey) {
-    showAlert('请先填写 DeepSeek API Key', 'error');
+    showAlert('请先填写 DeepSeek API Key 或设置环境变量 DEEPSEEK_API_KEY', 'error');
     return;
   }
 
@@ -254,6 +295,82 @@ btnSelect.addEventListener('click', async () => {
   }
 });
 
+// 保存字体大小设置
+btnSaveFontSize.addEventListener('click', async () => {
+  let fontSize = parseInt(fontSizeInput.value, 10);
+  
+  if (isNaN(fontSize) || fontSize < 10) {
+    fontSize = 10;
+  } else if (fontSize > 36) {
+    fontSize = 36;
+  }
+  fontSizeInput.value = fontSize;
+
+  // 持久化到 storage
+  await chrome.storage.local.set({ mangaLensFontSize: fontSize });
+
+  // 通知 content script
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tab.id) {
+      await chrome.tabs.sendMessage(tab.id, {
+        type: 'UPDATE_FONT_SIZE',
+        fontSize
+      });
+    }
+  } catch (error) {
+    console.error('通知 content script 失败:', error);
+  }
+
+  showAlert(`✅ 字体大小已保存: ${fontSize}px（新图片刷新后生效）`, 'success');
+});
+
+// 保存单次翻译上限
+btnSaveBatchLimit.addEventListener('click', async () => {
+  let limit = parseInt(batchLimitInput.value, 10);
+
+  if (isNaN(limit) || limit < 1) {
+    limit = 1;
+  } else if (limit > 100) {
+    limit = 100;
+  }
+  batchLimitInput.value = limit;
+
+  // 持久化到 storage
+  await chrome.storage.local.set({ mangaLensBatchLimit: limit });
+
+  // 通知 content script
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tab.id) {
+      await chrome.tabs.sendMessage(tab.id, {
+        type: 'UPDATE_BATCH_LIMIT',
+        limit
+      });
+    }
+  } catch (error) {
+    console.error('通知 content script 失败:', error);
+  }
+
+  showAlert(`✅ 单次翻译上限已保存: ${limit} 张`, 'success');
+  updateStatus();
+});
+
+// 继续翻译按钮
+btnContinueTranslation.addEventListener('click', async () => {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tab.id) {
+      await chrome.tabs.sendMessage(tab.id, { type: 'CONTINUE_TRANSLATION' });
+      showAlert('✅ 翻译已恢复，计数已清零', 'success');
+      btnContinueTranslation.style.display = 'none';
+      await updateStatus();
+    }
+  } catch (error) {
+    showAlert('操作失败，请刷新页面后重试', 'error');
+  }
+});
+
 // 开关控制
 toggleEnabled.addEventListener('change', async () => {
   const enabled = toggleEnabled.checked;
@@ -269,6 +386,25 @@ toggleEnabled.addEventListener('change', async () => {
     }
   } catch (error) {
     console.error('切换状态失败:', error);
+  }
+
+  await updateStatus();
+});
+
+// 本地缓存开关控制
+toggleCacheEnabled.addEventListener('change', async () => {
+  const enabled = toggleCacheEnabled.checked;
+
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tab.id) {
+      await chrome.tabs.sendMessage(tab.id, {
+        type: 'TOGGLE_CACHE',
+        enabled
+      });
+    }
+  } catch (error) {
+    console.error('切换缓存状态失败:', error);
   }
 
   await updateStatus();
