@@ -53,6 +53,9 @@ export class PDFExporter {
   private editingToolbar: HTMLElement | null = null;  // 编辑工具栏(body子元素, fixed定位)
   private modifiedContainers = new Set<HTMLElement>(); // PDF模式下 pointer-events 被改为 auto 的容器
   private customFontSizes = new Map<string, number>();   // 每个覆盖层的自定义字号 (overlayId → px)
+  private customOpacities = new Map<string, number>();    // 每个覆盖层的自定义透明度 (overlayId → 0~1)
+  private globalOpacity = 0.88;                           // 全局默认背景透明度
+  private deletedDialogIds = new Set<number>();           // 用户删除的 MergedDialog id，持久化时从缓存中移除
   private imageDataUrlCache = new Map<string, string>(); // imageSrc → dataURL 缓存(解决CORS)
 
   // 工具栏按钮引用
@@ -89,9 +92,29 @@ export class PDFExporter {
     return new Map(this.customFontSizes);
   }
 
+  /** 获取全局背景透明度 */
+  getGlobalOpacity(): number {
+    return this.globalOpacity;
+  }
+
+  /** 获取所有覆盖层的自定义透明度快照（overlayId → 0~1） */
+  getCustomOpacities(): Map<string, number> {
+    return new Map(this.customOpacities);
+  }
+
   /** 清空自定义字体大小缓存 */
   resetCustomFontSizes(): void {
     this.customFontSizes.clear();
+  }
+
+  /** 获取被删除的 MergedDialog ID 集合（用于持久化时从缓存中移除） */
+  getDeletedDialogIds(): Set<number> {
+    return new Set(this.deletedDialogIds);
+  }
+
+  /** 清空删除追踪 */
+  resetDeletedDialogIds(): void {
+    this.deletedDialogIds.clear();
   }
 
   /** 进入PDF编辑模式 */
@@ -137,6 +160,8 @@ export class PDFExporter {
     // 清理编辑态覆盖层
     this.clearEditingState();
     this.customFontSizes.clear();
+    this.customOpacities.clear();
+    this.deletedDialogIds.clear();
 
     this.isPdfMode = false;
     this.selectedImages.clear();
@@ -512,7 +537,7 @@ export class PDFExporter {
       const overlays = this.callbacks.getOverlaysForImage(img);
       for (const overlay of overlays) {
         const dialogId = parseInt(overlay.dataset.dialogId || '', 10);
-        if (dialogId && dialogFontMap.has(dialogId)) {
+        if (!isNaN(dialogId) && dialogFontMap.has(dialogId)) {
           const fontSize = dialogFontMap.get(dialogId)!;
           overlay.style.fontSize = `${fontSize}px`;
           this.customFontSizes.set(overlay.id, fontSize);
@@ -619,6 +644,9 @@ export class PDFExporter {
     this.editingOverlay = overlay;
     overlay.style.outline = '2px solid #667eea';
     overlay.style.zIndex = '10';
+
+    // 🔧 清除 overflow:hidden，否则 bottom:-4px 的 resize handles 会被裁剪，导致无法向下拉伸
+    overlay.style.overflow = 'visible';
 
     // 文字可编辑
     overlay.contentEditable = 'true';
@@ -873,6 +901,52 @@ export class PDFExporter {
     fontSizeGroup.appendChild(fontSizeLabel);
     fontSizeGroup.appendChild(fontSizeInput);
 
+    // 透明度滑块组
+    const opacityGroup = document.createElement('div');
+    opacityGroup.style.cssText = `
+      display: flex; align-items: center; gap: 2px;
+      background: rgba(0,0,0,0.75); border-radius: 4px; padding: 2px 6px;
+    `;
+    const opacityLabel = document.createElement('span');
+    opacityLabel.textContent = '透明';
+    opacityLabel.style.cssText = 'color: #aaa; font-size: 11px; user-select: none;';
+    const opacityInput = document.createElement('input');
+    opacityInput.type = 'range';
+    opacityInput.min = '0';
+    opacityInput.max = '100';
+    opacityInput.step = '1';
+    // 初始值：优先从 customOpacities 取，否则用 globalOpacity
+    const savedOpacity = this.customOpacities.get(overlay.id);
+    const currentBgOpacity = savedOpacity !== undefined ? savedOpacity : this.globalOpacity;
+    opacityInput.value = String(Math.round(currentBgOpacity * 100));
+    opacityInput.style.cssText = `
+      width: 60px; height: 20px;
+      accent-color: #667eea;
+      cursor: pointer; pointer-events: auto;
+    `;
+    opacityInput.title = `背景透明度: ${opacityInput.value}%`;
+    const opacityValueSpan = document.createElement('span');
+    opacityValueSpan.textContent = `${opacityInput.value}%`;
+    opacityValueSpan.style.cssText = 'color: #fff; font-size: 11px; min-width: 30px; text-align: center;';
+    opacityGroup.appendChild(opacityLabel);
+    opacityGroup.appendChild(opacityInput);
+    opacityGroup.appendChild(opacityValueSpan);
+
+    // 透明度变化 → 立刻更新 overlay + 记录
+    const updateOpacity = () => {
+      const newOpacity = parseInt(opacityInput.value, 10) / 100;
+      if (isNaN(newOpacity)) return;
+      // 修改 overlay 的 background-color
+      const currentBg = overlay.style.backgroundColor || 'rgba(255, 255, 255, 0.88)';
+      const newBg = currentBg.replace(/rgba?\((\d+),\s*(\d+),\s*(\d+),?\s*[\d.]+\)/, `rgba($1,$2,$3,${newOpacity.toFixed(2)})`);
+      overlay.style.backgroundColor = newBg;
+      this.customOpacities.set(overlay.id, newOpacity);
+      opacityValueSpan.textContent = `${Math.round(newOpacity * 100)}%`;
+      this.callbacks.onSaveEdits('', []);
+    };
+    opacityInput.addEventListener('input', updateOpacity);
+    opacityInput.addEventListener('mousedown', (e) => e.stopPropagation());
+
     // 字号变化 → 立刻更新 overlay 并记录
     const updateFontSize = () => {
       const newSize = parseInt(fontSizeInput.value, 10);
@@ -897,6 +971,11 @@ export class PDFExporter {
     btnDelete.addEventListener('mousedown', (e) => {
       e.stopPropagation();
       e.preventDefault();
+      // 🔧 记录被删除的 MergedDialog ID，持久化时从缓存中移除
+      const dialogId = parseInt(overlay.dataset.dialogId || '', 10);
+      if (!isNaN(dialogId)) {
+        this.deletedDialogIds.add(dialogId);
+      }
       this.customFontSizes.delete(overlay.id);
       this.callbacks.onSaveEdits('', []);
       overlay.remove();
@@ -920,6 +999,7 @@ export class PDFExporter {
     });
 
     toolbar.appendChild(fontSizeGroup);
+    toolbar.appendChild(opacityGroup);
     toolbar.appendChild(btnDelete);
     toolbar.appendChild(btnDone);
 

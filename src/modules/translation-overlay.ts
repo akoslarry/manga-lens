@@ -805,7 +805,9 @@ export class TranslationOverlayManager {
     }
     
     // 构建样式
-    const bgWithOpacity = this.hexToRgba(cfg.background, cfg.backgroundOpacity);
+    // 🔧 支持单覆盖层自定义透明度：dialog.customOpacity > cfg.backgroundOpacity（全局默认）
+    const effectiveOpacity = dialog.customOpacity ?? cfg.backgroundOpacity;
+    const bgWithOpacity = this.hexToRgba(cfg.background, effectiveOpacity);
     
     overlay.style.cssText = `
       position: absolute;

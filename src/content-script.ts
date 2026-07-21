@@ -931,7 +931,8 @@ async function handlePdfModeExit(): Promise<void> {
         if (customFontSizes.has(overlayId)) {
           const fontSize = customFontSizes.get(overlayId)!;
           const dialogId = parseInt(overlay.dataset.dialogId || '', 10);
-          if (dialogId) {
+          // 🔧 修复：dialogId 为 0 时 parseInt("0")===0 是 falsy，改用 !isNaN()
+          if (!isNaN(dialogId)) {
             const dialog = cachedDialogs.find((d: any) => d.id === dialogId);
             if (dialog) {
               dialog.customFontSize = fontSize;
@@ -940,7 +941,31 @@ async function handlePdfModeExit(): Promise<void> {
         }
       }
 
-      // 覆盖写入缓存
+      // 🔧 持久化用户删除的对话框：从缓存中移除已删除的 MergedDialog
+      const deletedIds = pdfExporter.getDeletedDialogIds();
+      if (deletedIds.size > 0) {
+        const beforeCount = cachedDialogs.length;
+        const filtered = cachedDialogs.filter((d: any) => !deletedIds.has(d.id));
+        cachedDialogs.length = 0;
+        cachedDialogs.push(...filtered);
+        console.log(`[MangaLens] 🗑️ 从缓存移除了 ${beforeCount - cachedDialogs.length} 个已被用户删除的覆盖层`);
+      }
+
+      // 🔧 持久化自定义透明度（使用 dataset.dialogId 匹配）
+      const customOpacities = pdfExporter.getCustomOpacities();
+      for (const overlay of overlays) {
+        const overlayId = overlay.id;
+        if (customOpacities.has(overlayId)) {
+          const opacity = customOpacities.get(overlayId)!;
+          const dialogId = parseInt(overlay.dataset.dialogId || '', 10);
+          if (!isNaN(dialogId)) {
+            const dialog = cachedDialogs.find((d: any) => d.id === dialogId);
+            if (dialog) {
+              dialog.customOpacity = opacity;
+            }
+          }
+        }
+      }
       await translationCache.set(img.src, cachedDialogs);
     }
     console.log('[MangaLens] ✅ 用户修改已持久化到本地缓存');

@@ -70,6 +70,8 @@ export interface MergedDialog {
     width?: string;
     height?: string;
   };
+  /** 用户手动设定的覆盖层背景透明度（0-1），null/undefined 表示使用全局默认值 */
+  customOpacity?: number;
 }
 
 /** 翻译后的对话（带完整翻译信息） */
