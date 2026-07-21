@@ -683,6 +683,44 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return true;
 
       // ============================================
+      // PDF导出：跨域图片转 Base64 Data URL
+      // Service Worker 不受 CORS 限制（有 host_permissions）
+      // ============================================
+      case 'FETCH_IMAGE_DATA_URL':
+        (async () => {
+          try {
+            const imageUrl = message.imageUrl;
+            const fetchOptions = buildFetchOptions(imageUrl, message.referer || '');
+
+            console.log('[Background] 📥 拉取图片:', imageUrl.substring(0, 80));
+
+            const response = await fetch(imageUrl, fetchOptions);
+            if (!response.ok) {
+              throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+
+            const blob = await response.blob();
+            // 将 blob 转为 base64 data URL
+            const dataUrl = await new Promise<string>((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(reader.result as string);
+              reader.onerror = () => reject(new Error('FileReader 转换失败'));
+              reader.readAsDataURL(blob);
+            });
+
+            console.log('[Background] ✅ 图片拉取成功, 大小:', blob.size, 'bytes');
+            sendResponse({ success: true, dataUrl });
+          } catch (error) {
+            console.error('[Background] ❌ 图片拉取失败:', error);
+            sendResponse({
+              success: false,
+              error: error instanceof Error ? error.message : '未知错误'
+            });
+          }
+        })();
+        return true;
+
+      // ============================================
       // 调试功能：显示图片获取的请求头信息
       // ============================================
       case 'DEBUG_IMAGE_HEADERS':

@@ -51,8 +51,10 @@ export class PDFExporter {
   private checkboxes: Map<string, HTMLElement> = new Map(); // imageSrc → 选择框元素
   private callbacks: PDFExporterCallbacks;
   private editingOverlay: HTMLElement | null = null; // 当前正在编辑的覆盖层
+  private editingToolbar: HTMLElement | null = null;  // 编辑工具栏(body子元素, fixed定位)
   private modifiedContainers = new Set<HTMLElement>(); // PDF模式下 pointer-events 被改为 auto 的容器
   private customFontSizes = new Map<string, number>();   // 每个覆盖层的自定义字号 (overlayId → px)
+  private imageDataUrlCache = new Map<string, string>(); // imageSrc → dataURL 缓存(解决CORS)
 
   // 工具栏按钮引用
   private btnExportAll: HTMLElement | null = null;
@@ -278,7 +280,7 @@ export class PDFExporter {
     const checkbox = document.createElement('div');
     checkbox.className = 'manga-lens-pdf-checkbox selected';
     checkbox.dataset.imageSrc = imageSrc;
-    checkbox.innerHTML = '<span class="ml-pdf-check-mark">✓</span>';
+    checkbox.innerHTML = '<span class="ml-pdf-check-mark" style="font-size:16px;display:flex;align-items:center;justify-content:center;">✅</span>';
     checkbox.title = '点击切换选中/取消';
 
     // 默认选中
@@ -339,27 +341,28 @@ export class PDFExporter {
       return;
     }
 
-    checkbox.style.display = 'flex';
+    const isSelected = checkbox.classList.contains('selected');
     checkbox.style.cssText = `
       position: fixed;
       top: ${rect.top + 8}px;
       left: ${rect.left + 8}px;
       z-index: 2147483646;
-      width: 28px; height: 28px;
+      width: 30px; height: 30px;
       border-radius: 8px;
-      border: 2px solid rgba(102,126,234,0.6);
-      background: rgba(26,26,46,0.9);
+      border: 2px solid ${isSelected ? 'rgba(102,126,234,0.8)' : 'rgba(255,255,255,0.25)'};
+      background: ${isSelected ? 'rgba(102,126,234,0.3)' : 'rgba(0,0,0,0.45)'};
       cursor: pointer;
       display: flex;
       align-items: center;
       justify-content: center;
-      transition: background 0.15s;
+      transition: all 0.15s;
       pointer-events: auto;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.3);
     `;
   }
 
   /** 切换单张图片选中状态 */
-  private toggleImageSelection(imageSrc: string, checkbox: HTMLElement, _imageEl: HTMLImageElement): void {
+  private toggleImageSelection(imageSrc: string, checkbox: HTMLElement, imageEl: HTMLImageElement): void {
     if (this.selectedImages.has(imageSrc)) {
       // 取消选中
       this.selectedImages.delete(imageSrc);
@@ -374,6 +377,8 @@ export class PDFExporter {
       if (checkMark) checkMark.style.display = '';
     }
 
+    // 刷新复选框外观
+    this.updateCheckboxPosition(imageEl, checkbox);
     this.updateToolbarCounts();
   }
 
@@ -411,6 +416,13 @@ export class PDFExporter {
           if (checkMark) checkMark.style.display = '';
         }
       });
+    }
+
+    // 刷新所有选择框外观
+    const allImages = this.callbacks.getTranslatedImages();
+    for (const img of allImages) {
+      const cb = this.checkboxes.get(img.src);
+      if (cb) this.updateCheckboxPosition(img, cb);
     }
 
     this.updateToolbarCounts();
@@ -563,11 +575,7 @@ export class PDFExporter {
     overlay.contentEditable = 'false';
     overlay.removeAttribute('contenteditable');
 
-    // 移除编辑工具栏
-    const toolbar = overlay.querySelector('.ml-overlay-edit-toolbar');
-    if (toolbar) toolbar.remove();
-
-    // 移除resize handles
+    // 移除resize handles (toolbar 已在 clearEditingState 中通过 editingToolbar 引用移除)
     overlay.querySelectorAll('.ml-resize-handle').forEach(h => h.remove());
   }
 
@@ -612,7 +620,6 @@ export class PDFExporter {
     this.editingOverlay = overlay;
     overlay.style.outline = '2px solid #667eea';
     overlay.style.zIndex = '10';
-    overlay.style.overflow = 'visible'; // 确保工具栏不被裁剪
 
     // 文字可编辑
     overlay.contentEditable = 'true';
@@ -639,12 +646,20 @@ export class PDFExporter {
     this.editingOverlay.removeAttribute('contenteditable');
     this.editingOverlay.removeEventListener('mousedown', this._onDragStart);
 
-    // 移除工具栏
-    const toolbar = this.editingOverlay.querySelector('.ml-overlay-edit-toolbar');
-    if (toolbar) toolbar.remove();
-
-    // 移除resize handles
+    // 移除 resize handles
     this.editingOverlay.querySelectorAll('.ml-resize-handle').forEach(h => h.remove());
+
+    // 移除 body 上的工具栏
+    if (this.editingToolbar && this.editingToolbar.parentElement) {
+      this.editingToolbar.remove();
+    }
+    this.editingToolbar = null;
+
+    // 移除工具栏位置更新器
+    if (this._toolbarPositionUpdater) {
+      this.positionUpdaters = this.positionUpdaters.filter(fn => fn !== this._toolbarPositionUpdater);
+      this._toolbarPositionUpdater = null;
+    }
 
     this.editingOverlay = null;
   }
@@ -800,27 +815,32 @@ export class PDFExporter {
 
   // ============================================
   // 编辑工具栏（删除 + 完成 + 字体大小）
+  // 注：工具栏是 body 的直接子元素（fixed定位），不受 overlay 父容器 overflow:hidden 影响
   // ============================================
 
   private addEditToolbar(overlay: HTMLElement): void {
+    // 移除旧工具栏
+    if (this.editingToolbar && this.editingToolbar.parentElement) {
+      this.editingToolbar.remove();
+    }
+
     const toolbar = document.createElement('div');
     toolbar.className = 'ml-overlay-edit-toolbar';
     toolbar.style.cssText = `
-      position: absolute; top: 100%; left: 0;
-      margin-top: 4px;
+      position: fixed;
       display: flex; gap: 4px; justify-content: center; align-items: center;
-      z-index: 20; pointer-events: auto; white-space: nowrap;
+      z-index: 2147483646; pointer-events: auto; white-space: nowrap;
     `;
 
     // 字体大小输入
     const fontSizeGroup = document.createElement('div');
     fontSizeGroup.style.cssText = `
       display: flex; align-items: center; gap: 2px;
-      background: rgba(0,0,0,0.7); border-radius: 4px; padding: 2px 4px;
+      background: rgba(0,0,0,0.75); border-radius: 4px; padding: 2px 6px;
     `;
     const fontSizeLabel = document.createElement('span');
     fontSizeLabel.textContent = '字号';
-    fontSizeLabel.style.cssText = 'color: #aaa; font-size: 10px;';
+    fontSizeLabel.style.cssText = 'color: #aaa; font-size: 11px; user-select: none;';
     const fontSizeInput = document.createElement('input');
     fontSizeInput.className = 'ml-font-size-input';
     fontSizeInput.type = 'number';
@@ -830,15 +850,22 @@ export class PDFExporter {
 
     // 初始值 = overlay 当前 fontSize
     const currentSize = parseInt(overlay.style.fontSize, 10) || 16;
-    // 检查是否有已保存的自定义字号
     const savedSize = this.customFontSizes.get(overlay.id);
     fontSizeInput.value = String(savedSize || currentSize);
     fontSizeInput.style.cssText = `
-      width: 36px; height: 20px; padding: 0 2px; font-size: 11px;
+      width: 48px; height: 22px; padding: 0 4px; font-size: 12px;
       text-align: center; border: 1px solid rgba(255,255,255,0.3);
       border-radius: 3px; background: rgba(255,255,255,0.15); color: #fff;
       outline: none; pointer-events: auto;
+      -moz-appearance: textfield;
     `;
+    // 隐藏 number input 的 spinner 箭头（避免挤占空间导致数字竖向显示）
+    const styleSheet = document.createElement('style');
+    styleSheet.textContent = `
+      .ml-font-size-input::-webkit-outer-spin-button,
+      .ml-font-size-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+    `;
+    toolbar.appendChild(styleSheet);
     fontSizeGroup.appendChild(fontSizeLabel);
     fontSizeGroup.appendChild(fontSizeInput);
 
@@ -858,7 +885,7 @@ export class PDFExporter {
     const btnDelete = document.createElement('button');
     btnDelete.textContent = '删除';
     btnDelete.style.cssText = `
-      padding: 2px 8px; font-size: 11px;
+      padding: 3px 10px; font-size: 12px;
       background: rgba(255,50,50,0.85); color: #fff;
       border: none; border-radius: 4px; cursor: pointer;
       pointer-events: auto; white-space: nowrap;
@@ -872,11 +899,11 @@ export class PDFExporter {
       this.clearEditingState();
     });
 
-    // 完成按钮
+    // 确认按钮
     const btnDone = document.createElement('button');
-    btnDone.textContent = '完成';
+    btnDone.textContent = '确认';
     btnDone.style.cssText = `
-      padding: 2px 8px; font-size: 11px;
+      padding: 3px 10px; font-size: 12px;
       background: rgba(102,126,234,0.85); color: #fff;
       border: none; border-radius: 4px; cursor: pointer;
       pointer-events: auto; white-space: nowrap;
@@ -891,7 +918,30 @@ export class PDFExporter {
     toolbar.appendChild(fontSizeGroup);
     toolbar.appendChild(btnDelete);
     toolbar.appendChild(btnDone);
-    overlay.appendChild(toolbar);
+
+    document.body.appendChild(toolbar);
+    this.editingToolbar = toolbar;
+
+    // 初始定位 + 注册位置更新
+    this.updateToolbarPosition(overlay);
+    this._toolbarPositionUpdater = () => this.updateToolbarPosition(overlay);
+    this.positionUpdaters.push(this._toolbarPositionUpdater);
+    this.ensureScrollListener();
+  }
+
+  private _toolbarPositionUpdater: (() => void) | null = null;
+
+  /** 更新工具栏位置（保持在overlay正下方） */
+  private updateToolbarPosition(overlay: HTMLElement): void {
+    if (!this.editingToolbar) return;
+    const rect = overlay.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) {
+      this.editingToolbar.style.display = 'none';
+      return;
+    }
+    this.editingToolbar.style.display = 'flex';
+    this.editingToolbar.style.top = `${rect.bottom + 4}px`;
+    this.editingToolbar.style.left = `${Math.max(4, rect.left)}px`;
   }
 
   // ============================================
@@ -923,6 +973,14 @@ export class PDFExporter {
     this.showProgressBar(0, targets.length);
     this.hideUIForScreenshot();
 
+    // 🔧 预拉取所有跨域图片为 data URL（通过 background service worker，不受 CORS 限制）
+    const originalSrcs = new Map<HTMLImageElement, string>();
+    try {
+      await this.prefetchImageDataUrls(targets, originalSrcs);
+    } catch (e) {
+      console.warn('[PDFExport] 图片预拉取部分失败，将尝试降级方案:', e);
+    }
+
     try {
       const pdf = new jsPDF({
         orientation: 'portrait',
@@ -937,9 +995,9 @@ export class PDFExporter {
         this.updateProgressBar(i + 1, targets.length);
 
         try {
+          // html2canvas：图片已替换为 data URL，无需 CORS
           const canvas = await html2canvas(target.parentElement, {
-            allowTaint: false,
-            useCORS: true,
+            allowTaint: true,
             scale: 1,
             backgroundColor: '#ffffff',
             logging: false,
@@ -956,16 +1014,20 @@ export class PDFExporter {
 
         } catch (html2canvasError) {
           console.warn(`[PDFExport] html2canvas 失败 (${target.imageSrc}):`, html2canvasError);
-          // 降级：直接在canvas上绘制图片
+          // 降级：使用 data URL 直接在 canvas 上绘制
           try {
+            const dataUrl = this.imageDataUrlCache.get(target.imageSrc);
+            if (!dataUrl) throw new Error('无缓存 data URL');
+
+            const img = await this.loadImageFromDataUrl(dataUrl);
             const canvas = document.createElement('canvas');
-            canvas.width = target.imageElement.naturalWidth;
-            canvas.height = target.imageElement.naturalHeight;
+            canvas.width = img.naturalWidth;
+            canvas.height = img.naturalHeight;
             const ctx = canvas.getContext('2d');
             if (ctx) {
               ctx.fillStyle = '#ffffff';
               ctx.fillRect(0, 0, canvas.width, canvas.height);
-              ctx.drawImage(target.imageElement, 0, 0);
+              ctx.drawImage(img, 0, 0);
 
               const imgRatio = canvas.height / canvas.width;
               const pageHeight = Math.min(PDF_PAGE_WIDTH * imgRatio, 594);
@@ -998,11 +1060,82 @@ export class PDFExporter {
       console.error('[PDFExport] PDF生成失败:', error);
       alert('PDF 生成失败，请查看控制台了解详情');
     } finally {
+      // 🔧 恢复原始图片 src
+      for (const [img, originalSrc] of originalSrcs) {
+        img.src = originalSrc;
+      }
+      this.imageDataUrlCache.clear();
       this.restoreUIAfterScreenshot();
       this.removeProgressBar();
     }
 
     console.log(`[PDFExport] ✅ PDF生成完成: ${targets.length}张图片`);
+  }
+
+  /** 通过 background service worker 预拉取跨域图片为 data URL，并临时替换 img.src */
+  private async prefetchImageDataUrls(
+    targets: ExportTarget[],
+    originalSrcs: Map<HTMLImageElement, string>
+  ): Promise<void> {
+    const uniqueUrls = [...new Set(targets.map(t => t.imageSrc))];
+
+    // 并行拉取所有图片
+    const results = await Promise.allSettled(
+      uniqueUrls.map(async (url) => {
+        // 已经是 data URL 或同源的跳过
+        if (url.startsWith('data:') || this.isSameOrigin(url)) {
+          this.imageDataUrlCache.set(url, url);
+          return;
+        }
+
+        return new Promise<void>((resolve, reject) => {
+          chrome.runtime.sendMessage(
+            { target: 'background', type: 'FETCH_IMAGE_DATA_URL', imageUrl: url },
+            (response) => {
+              if (response?.success && response.dataUrl) {
+                this.imageDataUrlCache.set(url, response.dataUrl);
+                resolve();
+              } else {
+                reject(new Error(response?.error || '拉取失败'));
+              }
+            }
+          );
+        });
+      })
+    );
+
+    // 替换图片 src 为 data URL
+    for (const target of targets) {
+      const dataUrl = this.imageDataUrlCache.get(target.imageSrc);
+      if (dataUrl && dataUrl !== target.imageSrc) {
+        originalSrcs.set(target.imageElement, target.imageSrc);
+        target.imageElement.src = dataUrl;
+      }
+    }
+
+    const successCount = results.filter(r => r.status === 'fulfilled').length;
+    const failCount = results.filter(r => r.status === 'rejected').length;
+    console.log(`[PDFExport] 📥 图片预拉取: ${successCount} 成功, ${failCount} 失败 (共 ${uniqueUrls.length} 张)`);
+  }
+
+  /** 判断 URL 是否与当前页面同源 */
+  private isSameOrigin(url: string): boolean {
+    try {
+      const u = new URL(url);
+      return u.origin === window.location.origin;
+    } catch {
+      return false;
+    }
+  }
+
+  /** 从 data URL 加载 Image 对象 */
+  private loadImageFromDataUrl(dataUrl: string): Promise<HTMLImageElement> {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error('data URL 图片加载失败'));
+      img.src = dataUrl;
+    });
   }
 
   // ============================================
