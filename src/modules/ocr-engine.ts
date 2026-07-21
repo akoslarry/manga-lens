@@ -732,8 +732,8 @@ export class MangaOCR {
     // 绘制所有锚点标记
     this.drawAllMarkers(ctx, allMarkers, markerSize, fontSize);
     
-    // 生成 DataURL
-    const base64WithAnchor = canvas.toDataURL('image/png');
+    // 生成 DataURL（JPEG 压缩以控制在 10MB 以内，质量 0.85 对锚点文字无实质影响）
+    const base64WithAnchor = canvas.toDataURL('image/jpeg', 0.85);
     
     return {
       base64WithAnchor,

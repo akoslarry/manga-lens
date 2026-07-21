@@ -1,6 +1,6 @@
 {
   "name": "manga-lens",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "MangaLens - 漫画实时翻译器，让你无感阅读生肉漫画",
   "type": "module",
   "scripts": {
@@ -13,6 +13,7 @@
     "crypto-js": "^4.2.0",
     "html2canvas": "^1.4.1",
     "jspdf": "^4.2.1",
+    "pdf-lib": "^1.17.1",
     "vue": "^3.4.21"
   },
   "devDependencies": {

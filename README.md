@@ -1,6 +1,6 @@
 # MangaLens - 漫画实时翻译器
 
-> 一款 Chrome 浏览器扩展，实时识别并翻译漫画图片中的日文文字
+> 一款 Chrome 浏览器扩展，实时识别并翻译漫画图片中的日文文字，支持 PDF 导出
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Chrome Web Store](https://img.shields.io/badge/Chrome-Extension-green)](https://chrome.google.com/webstore)
@@ -11,22 +11,36 @@
 
 ## 功能特性
 
-### 核心功能
+### 核心翻译管线
 
 | 功能 | 说明 |
 |------|------|
-| **腾讯云 OCR** | 支持通用印刷体和高精度版文字识别 |
-| **智能翻译** | 支持 DeepSeek V4 Pro API 翻译 |
-| **并发控制** | OCR 队列（3并发）+ 翻译队列（5并发），避免 API 限流 |
-| **对话合并** | 基于距离聚类算法，将分散文字合并为完整句子 |
-| **四角锚点** | 8点锚点标记，自动检测图片旋转并校正坐标 |
+| **腾讯云 OCR** | 支持通用印刷体、高精度版、手写体、英文四种识别模式 |
+| **DeepSeek V4 Pro 翻译** | 智能日→中翻译，上下文感知 |
+| **并发控制** | OCR 队列（3并发）+ 翻译队列（5并发），10 任务上限自动暂停 |
+| **对话合并** | 基于距离聚类的智能分组算法，竖排/横排自适应方向检测 |
+| **四角锚点** | 8 点锚点自动检测图片旋转并校正坐标 |
 | **RTL 支持** | 日漫从右往左阅读模式 |
+| **本地翻译缓存** | IndexedDB 持久化存储，刷新页面无需重新调用 API，节省 Token |
+
+### PDF 导出编辑
+
+| 功能 | 说明 |
+|------|------|
+| **进入导出模式** | Popup 一键进入编辑态 |
+| **双击编辑文字** | 双击覆盖层直接修改翻译文本 |
+| **拖拽移动** | 拖拽覆盖层调整位置 |
+| **缩放手柄** | 四角拖拽调整覆盖层尺寸 |
+| **字号调节** | 单个覆盖层独立字号设置 |
+| **透明度控制** | 独立调节覆盖层透明度 |
+| **删除覆盖层** | 移除不需要的翻译气泡 |
+| **工具栏** | 选中覆盖层弹出编辑工具栏（字号/透明/删除） |
+| **PDF 导出** | jsPDF + html2canvas 合成 PDF，支持自定义保存子目录 |
+| **退出自动保存** | 退出时自动持久化所有编辑到本地缓存 |
 
 ---
 
 ## 技术架构
-
-### 架构图
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -35,7 +49,7 @@
 │                                                                  │
 │  ┌──────────────┐      ┌───────────────────┐                   │
 │  │  popup.html  │ ←──→ │  content-script   │                   │
-│  │   (Vue UI)   │      │    (主脚本)        │                   │
+│  │  (原生 HTML) │      │    (主脚本)        │                   │
 │  └──────────────┘      └─────────┬─────────┘                   │
 │                                  │                              │
 │                         chrome.runtime.sendMessage               │
@@ -52,6 +66,9 @@
 │              │           │ │  (Base64)  │ │ 翻译 API  │        │
 │              └───────────┘ └────────────┘ └───────────┘        │
 │                                                                  │
+│  本地存储层:  translation-cache (IndexedDB 持久化翻译结果)     │
+│  PDF 导出层:  export-pdf (jsPDF + html2canvas 合成)             │
+│                                                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -61,10 +78,12 @@
 |------|------|
 | 扩展框架 | Chrome Extension Manifest V3 |
 | 构建工具 | Vite 5 + TypeScript 5 |
-| UI 框架 | Vue 3 |
 | 签名算法 | TC3-HMAC-SHA256 (腾讯云) |
 | 加密库 | CryptoJS |
 | OCR 引擎 | 腾讯云 OCR API |
+| 翻译引擎 | DeepSeek V4 Pro |
+| PDF 导出 | jsPDF + html2canvas + pdf-lib |
+| 本地存储 | IndexedDB (idb-keyval) |
 
 ---
 
@@ -73,7 +92,7 @@
 ### 前置要求
 
 - Node.js 18+
-- npm 或 yarn
+- npm
 - Chrome 浏览器
 
 ### 安装步骤
@@ -107,33 +126,26 @@ npm run build   # 构建生产版本
 
 ## 配置说明
 
-### 扩展配置项
-
 打开扩展 popup 界面（点击扩展图标），配置以下选项：
 
 | 配置项 | 说明 | 必填 |
 |--------|------|------|
 | **翻译开关** | 开启/关闭翻译功能 | 是 |
+| **本地翻译缓存** | 启用后刷新页面直接读缓存 | 推荐开启 |
 | **DeepSeek API Key** | 翻译 API 密钥 | 是（支持环境变量 `DEEPSEEK_API_KEY`） |
 | **腾讯云 SecretId** | OCR API 身份标识 | 是 |
 | **腾讯云 SecretKey** | OCR API 密钥 | 是 |
-| **OCR 模式** | 直接 API（腾讯云 OCR） | 是 |
 | **腾讯云地域** | 如 ap-guangzhou | 是 |
+| **OCR 模式** | 高精度/基础/手写体/英文 | 是 |
+| **字体大小** | 覆盖层默认字号（10-36px）| 默认 22px |
+| **单次翻译上限** | 每批次最大图片数（1-100）| 默认 30 |
+| **PDF 保存子目录** | 下载目录下的子目录名 | 默认 manga-exports |
 
 ### API 密钥获取
 
-#### 腾讯云 OCR
+**腾讯云 OCR**：访问 [腾讯云控制台](https://console.cloud.tencent.com/cam/capi) → 创建子用户并授权 `QcloudOCRFullAccess` → 获取 SecretId/SecretKey → 开通 [通用文字识别（高精度版）](https://console.cloud.tencent.com/ocr/overview)。
 
-1. 访问 [腾讯云控制台](https://console.cloud.tencent.com/cam/capi)
-2. 创建子用户，并授权	QcloudOCRFullAccess。
-3. 访问密钥，获取 SecretId 和 SecretKey
-4. 开通 [通用文字识别（高精度版）](https://console.cloud.tencent.com/ocr/overview) 服务
-
-#### DeepSeek 翻译
-
-1. 访问 [DeepSeek 控制台](https://platform.deepseek.com/api_keys)
-2. 创建 API Key
-3. 将 Key 填入扩展配置，或设置环境变量 `DEEPSEEK_API_KEY`
+**DeepSeek 翻译**：访问 [DeepSeek 控制台](https://platform.deepseek.com/api_keys) → 创建 API Key → 填入扩展配置或设置环境变量 `DEEPSEEK_API_KEY`。
 
 ---
 
@@ -141,53 +153,56 @@ npm run build   # 构建生产版本
 
 ```
 manga-lens/
-├── dist/                         # 构建输出目录
-│   ├── manifest.json            # 扩展配置
-│   ├── background.js            # 后台脚本
-│   ├── content-script.js        # 内容脚本
-│   ├── popup.html               # 弹出窗口
-│   ├── popup.js                 # Popup 逻辑
-│   └── content-styles.css       # 内容样式
+├── dist/                          # 构建输出目录
+│   ├── manifest.json
+│   ├── background.js              # Service Worker
+│   ├── content-script.js          # 内容脚本（主入口）
+│   ├── popup.html                 # 弹出窗口
+│   └── content-styles.css         # 覆盖层样式
 │
-├── public/                       # 静态资源
-│   ├── manifest.json            # 扩展配置
-│   ├── popup.html               # Popup HTML
-│   └── content-styles.css       # 内容页样式
+├── public/                        # 静态资源
+│   ├── manifest.json              # 扩展清单
+│   ├── popup.html                 # Popup 页面
+│   └── content-styles.css         # 内容页样式
 │
-├── src/                          # 源代码
-│   ├── content-script.ts         # 内容脚本入口
-│   ├── background.ts             # 后台脚本（API 中转）
+├── src/                           # 源代码
+│   ├── content-script.ts          # 内容脚本入口（翻译管线 + PDF模式）
+│   ├── background.ts              # 后台脚本（API 中转 + 图片获取）
 │   │
-│   └── modules/                  # 功能模块
-│       ├── ocr-engine.ts         # OCR 引擎 + 锚点机制
-│       ├── translator.ts         # 翻译模块（DeepSeek V4 Pro）
-│       ├── local-translator.ts   # 本地翻译（可选）
-│       ├── translation-overlay.ts # 翻译覆盖层渲染
-│       ├── dialog-merger.ts      # 对话合并算法
-│       ├── batch-translator.ts   # 批量翻译
-│       ├── image-detector.ts     # 图片检测
-│       └── tencent-cloud-ocr-direct.ts # 腾讯云 OCR 直连
+│   └── modules/                   # 功能模块
+│       ├── ocr-engine.ts          # OCR 引擎 + 四角锚点机制
+│       ├── tencent-cloud-ocr-direct.ts  # 腾讯云 OCR 直连客户端
+│       ├── cloud-ocr-client.ts    # 云端 OCR 请求封装
+│       ├── translator.ts          # DeepSeek V4 Pro 翻译器
+│       ├── batch-translator.ts    # 批量翻译调度
+│       ├── dialog-merger.ts       # 对话合并算法（距离聚类）
+│       ├── translation-overlay.ts # 翻译覆盖层渲染引擎
+│       ├── translation-cache.ts   # IndexedDB 本地翻译缓存
+│       ├── export-pdf.ts          # PDF 导出编辑引擎（编辑/缩放/透明度/合成）
+│       └── image-detector.ts      # 漫画图片检测
 │
-├── package.json                  # 项目配置
-├── vite.config.ts               # Vite 配置
-├── tsconfig.json                 # TypeScript 配置
-└── README.md                    # 本文件
+├── package.json
+├── vite.config.ts
+├── tsconfig.json
+├── post-build.mjs                 # 构建后处理脚本
+└── README.md
 ```
 
 ---
 
 ## 核心模块说明
 
-### 1. content-script.ts - 内容脚本
+### 1. content-script.ts — 内容脚本主入口
 
-负责漫画页面的图片检测、OCR 排队和翻译渲染。
+漫画页面的图片检测、OCR 排队、翻译渲染、PDF 编辑模式的全部调度中心。
 
 **并发控制机制**:
 
-```typescript
-const OCR_CONCURRENCY = 3;           // 最多 3 个并发 OCR
-const TRANSLATION_CONCURRENCY = 5;  // 最多 5 个并发翻译
-const TRANSLATION_QUEUE_LIMIT = 10;  // 队列满时暂停 OCR
+```
+OCR 队列: 3 并发
+翻译队列: 5 并发
+任务上限: 10（队列满时暂停 OCR）
+批次上限: 默认 30 张/次（可在 Popup 中配置 1-100）
 ```
 
 **消息类型**:
@@ -199,87 +214,37 @@ const TRANSLATION_QUEUE_LIMIT = 10;  // 队列满时暂停 OCR
 | `REFRESH` | Popup | 刷新页面翻译 |
 | `SELECT_IMAGE` | Popup | 手动选择图片 |
 | `GET_STATUS` | Popup | 获取处理状态 |
+| `ENTER_PDF_MODE` | Popup | 进入 PDF 导出编辑模式 |
 
-### 2. background.ts - 后台脚本
+### 2. background.ts — Service Worker
 
-作为中转服务，解决 CORS 问题。
+API 请求中转，解决浏览器跨域限制。核心能力：图片 URL→Base64 转换、腾讯云 OCR 签名请求（Base64 及 URL 两种模式）。
 
-**核心功能**:
+### 3. dialog-merger.ts — 对话合并
 
-| 函数 | 功能 |
-|------|------|
-| `fetchImageAsBase64()` | 获取图片并转为 Base64 |
-| `backgroundRecognizeWithTencentCloudAPI_Base64()` | 腾讯云 OCR (Base64 模式) |
-| `backgroundRecognizeWithTencentCloudAPI_ImageUrl()` | 腾讯云 OCR (URL 模式) |
+距离聚类算法将 OCR 碎片合并为完整对话。
 
-### 3. dialog-merger.ts - 对话合并
+**合并流程**：预处理（边界计算 + 竖排/横排判断）→ 分离方向 → 按行/列分组 → 组内排序（竖排按Y、横排按 RTL 规则）→ 距离阈值合并。
 
-将分散的 OCR 结果合并为完整的对话。
+### 4. translation-cache.ts — 本地翻译缓存
 
-**合并算法**:
+基于 IndexedDB 的持久化翻译缓存。刷新页面时直接读取缓存渲染，避免重复调用 OCR/翻译 API。在 PDF 编辑模式下自动同步用户修改（文字/位置/字号/透明度/删除）。
 
-```typescript
-interface DialogMergerConfig {
-  xThreshold: 40,        // X轴容差：同一列判定
-  yThreshold: 40,        // Y轴容差：同一行判定
-  rtlMode: true,         // 日漫从右往左阅读
-  bubblePadding: 8,
-  maxMergeDistance: 300  // 最大合并距离
-}
-```
+### 5. export-pdf.ts — PDF 导出编辑引擎
 
-**合并流程**:
+完整的所见即所得编辑系统：
 
-1. **预处理**：计算边界 + 判断方向（竖排/横排）
-2. **分离方向**：按宽高比分为竖排片段和横排片段
-3. **分组**：
-   - 竖排：按 X 起始点分组（同一列）
-   - 横排：按 Y 起始点分组（同一行）
-4. **组内排序**：
-   - 竖排：按 Y 坐标排序（从上到下）
-   - 横排：按 X 坐标排序（从右往左/从左往右）
-5. **合并**：基于距离判断是否合并为同一对话
+- **选择系统**：点击选中覆盖层，边框高亮 + 缩放四角手柄
+- **文本编辑**：双击覆盖层进入文字编辑模式
+- **拖拽移动**：选中后拖拽平移覆盖层位置
+- **缩放手柄**：四角拖拽缩放覆盖层尺寸
+- **工具栏**：选中后弹出浮动工具栏（字号调节/透明度滑块/删除按钮）
+- **PDF 合成**：jsPDF + html2canvas 渲染整页为 PDF
+- **自动保存**：退出时自动持久化所有编辑到 IndexedDB 缓存
 
-### 4. translation-overlay.ts - 翻译覆盖层
+### 6. ocr-engine.ts — OCR 引擎
 
-在原图片位置渲染翻译文字。
-
-**渲染选项**:
-
-| 选项 | 说明 |
-|------|------|
-| 字体 | 可选多种字体 |
-| 背景 | 半透明白色背景 |
-| 描边 | 文字描边防止覆盖 |
-| 字号 | 根据原文长度自动调整 |
-
-### 5. ocr-engine.ts - OCR 引擎
-
-负责 OCR 调用和四角锚点机制。
-
-**四角锚点机制**:
-
-```
-在图片四角和四边中点添加8个锚点标记：
-┌─────────────────────────────────────┐
-│ 左上      上中      右上            │
-│                                     │
-│ 左中                    右中          │
-│                                     │
-│ 左下      下中      右下            │
-└─────────────────────────────────────┘
-
-锚点文本：左上、右上、右下、左下、上中、下中、左中、右中
-```
-
-**工作流程**:
-
-1. 在图片上绘制 8 个锚点标记
-2. 发送带锚点的图片到 OCR
-3. OCR 识别锚点位置
-4. 对比预期位置与实际位置，检测旋转角度
-5. 校正所有文字坐标到正确方向
-6. 过滤掉锚点文本
+腾讯云 OCR 调用与四角锚点机制。在图片四角及四边中点添加 8 个锚点标记，OCR 识别锚点后对比预期位置检测旋转角度，校正所有文字坐标。
 
 ---
 
@@ -287,93 +252,71 @@ interface DialogMergerConfig {
 
 ### 基础操作
 
-1. **开启翻译**
-   - 点击扩展图标
-   - 开启右上角开关
-   - 页面自动开始处理漫画图片
+1. **配置 API**：点击扩展图标 → 分别配置翻译 API 和 OCR 设置 → 保存并测试连接
+2. **开启翻译**：打开右上角开关，页面自动开始处理漫画图片
+3. **手动选择**：点击"手动选择图片或重新翻译" → 点击页面上的目标图片
+4. **刷新翻译**：点击"刷新页面翻译"按钮
 
-2. **手动选择图片**
-   - 点击扩展图标
-   - 点击"手动选择图片"按钮
-   - 点击页面上的漫画图片
+### PDF 导出流程
 
-3. **刷新翻译**
-   - 点击"刷新页面翻译"按钮
+1. 等待所有目标图片翻译完成
+2. 点击 Popup 中的「进入PDF导出模式」
+3. 在编辑模式下调整覆盖层：双击改文字、拖拽改位置、缩放改大小、工具栏调字号/透明度
+4. 点击「退出PDF导出模式」→ 自动保存所有修改到本地缓存
+5. 下一次进入同一页面时，编辑结果会从缓存直接加载
 
-4. **查看状态**
-   - 点击扩展图标
-   - 查看处理进度和统计
-
-
+---
 
 ## 常见问题
 
-### Q: OCR 识别不准确？
+**Q: OCR 识别不准确？**
+检查图片清晰度，漫画推荐使用「高精度识别」模式。锚点机制会自动检测和校正旋转。
 
-A: 检查以下事项：
-- 图片清晰度：建议使用高清漫画源站
-- API 配置：确认腾讯云 OCR 服务已开通
-- 文字方向：四角锚点机制会自动检测和校正
+**Q: 翻译很慢？**
+检查网络连接和 API 配额。翻译瓶颈通常在 DeepSeek API 响应速度，OCR 3 并发可充分并行。
 
-### Q: 翻译很慢？
+**Q: 如何卸载扩展？**
+打开 `chrome://extensions/`，找到 MangaLens，点击"移除"。
 
-A:
-- 检查网络连接
-- 确认 API 配额充足
-- 减少单页漫画数量
-
-### Q: 如何卸载扩展？
-
-A: 打开 `chrome://extensions/`，找到 MangaLens，点击"移除"。
+**Q: 退出 PDF 模式后编辑丢失？**
+v1.1.0 起退出时自动弹窗确认并持久化。选择"保留修改"即写入本地缓存，刷新页面不丢失。
 
 ---
 
 ## 更新日志
 
-### v1.0.5 (当前版本)
+### v1.1.0
+
+- **PDF 导出编辑系统**：完整的所见即所得编辑，支持双击改文字、拖拽移动、缩放调整
+- **覆盖层透明度**：单个覆盖层独立透明度控制（滑块调节）
+- **覆盖层删除**：移除不需要的翻译气泡
+- **浮动工具栏**：选中覆盖层弹出编辑工具栏（字号/透明/删除）
+- **退出自动保存**：修复退出时不触发保存的 bug（缩放未标记脏数据 + 退出前条件跳过），确保编辑结果持久化
+- **本地翻译缓存**：IndexedDB 持久化管理，支持启用/禁用开关
+- **单次翻译上限**：可配置批次最大图片数
+- 移除 Hugging Face 本地 OCR 依赖，统一使用腾讯云 OCR
+
+### v1.0.5
 
 - 支持腾讯云 OCR 直接 API 模式
-- 新增 Hugging Face 本地 PaddleOCR 模型
 - 实现 OCR/翻译双队列并发控制
 - 四角锚点机制：自动检测图片旋转并校正坐标
 - 对话合并算法优化：基于距离的智能分组
 
 ---
 
+## 未来规划
 
-
-## 未来开发目标
-
-### 短期目标
-
-- [ ] **主流漫画网站防爬虫适配**
-  - 针对 Pixiv、FANBOX、漫画王等主流漫画网站的反爬机制进行适配
-  - 实现 Referer 伪装、Cookie 处理、UA 轮换等机制
-  - 解决 403/418 等常见反爬限制
-
-- [ ] **导出翻译结果为 PDF**
-  - 支持将翻译后的漫画页面导出为 PDF 格式
-  - 保留原图质量和翻译覆盖层
-  - 支持批量导出和分章节打包
-
-### 中期目标
-
-- [ ] **跨平台支持**
-  - **手机端应用**：开发 Android/iOS 原生应用或 Flutter 跨平台应用
-  - **电脑端桌面版**：Electron 桌面应用，无需浏览器扩展即可使用
-  - 实现更稳定的图片获取和 OCR 识别能力
-
-### 长期目标
-
-- [ ] **SaaS 云服务化**
-  - 用户无需自行注册和配置 API 密钥
-  - 所有 OCR/翻译能力由项目方统一管理和付费
-  - 采用订阅制商业模式，支持多档位会员体系
-  - 提供稳定、快速、一键使用的用户体验
+- [ ] **主流漫画网站反爬适配** — Pixiv/FANBOX 等网站的 Referer/Cookie/UA 反爬处理
+- [ ] **批量 PDF 导出** — 多页面/分章节一键导出
+- [ ] **跨平台桌面版** — Electron 桌面应用，脱离浏览器扩展限制
+- [ ] **SaaS 云服务化** — 统一管理 API 密钥，订阅制一键翻译
 
 ---
 
 ## 致谢
 
-- [腾讯云 OCR](https://cloud.tencent.com/product/ocr) - 文字识别服务
-- [DeepSeek](https://www.deepseek.com/) - 翻译 API
+- [腾讯云 OCR](https://cloud.tencent.com/product/ocr) — 文字识别服务
+- [DeepSeek](https://www.deepseek.com/) — 翻译 API
+- [jsPDF](https://github.com/parallax/jsPDF) — PDF 生成
+- [html2canvas](https://html2canvas.hertzen.com/) — 页面截图渲染

@@ -4,11 +4,12 @@
  * 功能：
  * 1. PDF模式浮动工具栏（导出全部/导出选中/全选/退出）
  * 2. 图片选择框（手动勾选导出目标，记录选中顺序）
- * 3. PDF生成（手动合成图片+覆盖层 → jsPDF写入，每图一页）
+ * 3. PDF生成（手动合成图片+覆盖层 → jsPDF分块写入 → pdf-lib合并为单文件）
  * 4. 进度条反馈
  */
 
 import { jsPDF } from 'jspdf';
+import { PDFDocument } from 'pdf-lib';
 
 // ============================================
 // 类型定义
@@ -35,6 +36,8 @@ export interface PDFExporterCallbacks {
   onExitRequest: () => void;
   /** 持久化用户修改 */
   onSaveEdits: (imageSrc: string, overlays: HTMLElement[]) => void;
+  /** 静默自动保存（导出PDF前触发，无需用户确认） */
+  onAutoSave: () => Promise<void>;
 }
 
 // ============================================
@@ -51,6 +54,7 @@ export class PDFExporter {
   private callbacks: PDFExporterCallbacks;
   private editingOverlay: HTMLElement | null = null; // 当前正在编辑的覆盖层
   private editingToolbar: HTMLElement | null = null;  // 编辑工具栏(body子元素, fixed定位)
+  private _savedMaxHeight: string | null = null;       // 编辑前 overlay 的 max-height（退出编辑时恢复）
   private modifiedContainers = new Set<HTMLElement>(); // PDF模式下 pointer-events 被改为 auto 的容器
   private customFontSizes = new Map<string, number>();   // 每个覆盖层的自定义字号 (overlayId → px)
   private customOpacities = new Map<string, number>();    // 每个覆盖层的自定义透明度 (overlayId → 0~1)
@@ -645,8 +649,21 @@ export class PDFExporter {
     overlay.style.outline = '2px solid #667eea';
     overlay.style.zIndex = '10';
 
-    // 🔧 清除 overflow:hidden，否则 bottom:-4px 的 resize handles 会被裁剪，导致无法向下拉伸
+    // 🔧 清除 overlay 自身 overflow:hidden，否则 bottom:-4px 的 resize handles 被裁剪
     overlay.style.overflow = 'visible';
+
+    // 🔧 父容器也有 overflow:hidden（translation-overlay.ts:98），
+    //     当 overlay 贴近图片边缘时，上下把手 -4px 会超出容器裁剪区域导致无法点击。
+    //     左右把手不受影响是因为文字框通常有水平边距，-4px 仍在容器内。
+    const container = overlay.parentElement;
+    if (container) {
+      container.style.overflow = 'visible';
+    }
+
+    // 🔧 解除 max-height 限制（translation-overlay.ts:839 创建时设为原始高度%），
+    //     否则纵向只能缩小不能扩大。退出编辑态时恢复。
+    this._savedMaxHeight = overlay.style.maxHeight || null;
+    overlay.style.maxHeight = 'none';
 
     // 文字可编辑
     overlay.contentEditable = 'true';
@@ -672,6 +689,23 @@ export class PDFExporter {
     this.editingOverlay.contentEditable = 'false';
     this.editingOverlay.removeAttribute('contenteditable');
     this.editingOverlay.removeEventListener('mousedown', this._onDragStart);
+
+    // 🔧 恢复父容器的 overflow（编辑态时临时设置为 visible）
+    const container = this.editingOverlay.parentElement;
+    if (container) {
+      container.style.overflow = '';
+    }
+
+    // 🔧 退出编辑态时更新 max-height 为当前实际高度，
+    //     而非恢复创建时的原始值。否则 resize 拉大后 max-height
+    //     限制会压回原大小（视觉回弹 bug）。
+    const currentHeight = this.editingOverlay.style.height;
+    if (currentHeight) {
+      this.editingOverlay.style.maxHeight = currentHeight;
+    } else {
+      this.editingOverlay.style.maxHeight = '';
+    }
+    this._savedMaxHeight = null;
 
     // 移除 resize handles
     this.editingOverlay.querySelectorAll('.ml-resize-handle').forEach(h => h.remove());
@@ -768,6 +802,9 @@ export class PDFExporter {
     for (const pos of positions) {
       const handle = document.createElement('div');
       handle.className = `ml-resize-handle ml-resize-${pos}`;
+      // 🔧 必须禁用 contentEditable 继承，否则在 contentEditable 父元素中，
+      // 把手会被浏览器的编辑行为拦截鼠标事件，导致无法拖拽缩放
+      handle.contentEditable = 'false';
       handle.style.cssText = `
         position: absolute;
         width: 10px; height: 10px;
@@ -776,6 +813,7 @@ export class PDFExporter {
         border-radius: 2px;
         z-index: 20;
         pointer-events: auto;
+        user-select: none;
       `;
       // 位置
       if (pos.includes('n')) handle.style.top = '-4px';
@@ -837,6 +875,7 @@ export class PDFExporter {
 
     const onUp = () => {
       this.resizeInfo = null;
+      this.callbacks.onSaveEdits('', []);
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mouseup', onUp);
     };
@@ -913,6 +952,7 @@ export class PDFExporter {
     opacityLabel.style.cssText = 'color: #aaa; font-size: 11px; user-select: none;';
     const opacityInput = document.createElement('input');
     opacityInput.type = 'range';
+    opacityInput.className = 'ml-opacity-slider';
     opacityInput.min = '0';
     opacityInput.max = '100';
     opacityInput.step = '1';
@@ -920,12 +960,57 @@ export class PDFExporter {
     const savedOpacity = this.customOpacities.get(overlay.id);
     const currentBgOpacity = savedOpacity !== undefined ? savedOpacity : this.globalOpacity;
     opacityInput.value = String(Math.round(currentBgOpacity * 100));
+    // 🔧 关键：-webkit-appearance: none 必须写在 inline style 中。
+    //     类选择器方式（<style> 注入 .ml-opacity-slider）在 content-script
+    //     环境下可能被浏览器 UA stylesheet 覆盖，导致原生垂直 slider 渲染。
+    //     height: 10px 给 thumb (12px×12px) 留出垂直居中的余量。
+    //     thumb 伪元素样式无法 inline，仍通过 <style> 注入到 <head>。
     opacityInput.style.cssText = `
-      width: 60px; height: 20px;
-      accent-color: #667eea;
+      -webkit-appearance: none !important; appearance: none !important;
+      width: 70px; height: 10px;
+      background: rgba(255,255,255,0.18);
+      border-radius: 3px; outline: none;
       cursor: pointer; pointer-events: auto;
+      writing-mode: horizontal-tb !important;
     `;
     opacityInput.title = `背景透明度: ${opacityInput.value}%`;
+
+    // 🔧 注入 thumb 样式到 <head>（伪元素无法通过 inline style 设置）
+    const SLIDER_STYLE_ID = 'ml-opacity-slider-style';
+    if (!document.getElementById(SLIDER_STYLE_ID)) {
+      const sliderStyle = document.createElement('style');
+      sliderStyle.id = SLIDER_STYLE_ID;
+      sliderStyle.textContent = `
+        .ml-opacity-slider::-webkit-slider-thumb {
+          -webkit-appearance: none !important; appearance: none !important;
+          width: 12px; height: 12px;
+          border-radius: 50%;
+          background: #667eea;
+          border: 2px solid #fff;
+          cursor: pointer;
+          margin-top: -2px;
+        }
+        .ml-opacity-slider::-moz-range-thumb {
+          width: 12px; height: 12px;
+          border-radius: 50%;
+          background: #667eea;
+          border: 2px solid #fff;
+          cursor: pointer;
+          border-style: solid;
+        }
+        .ml-opacity-slider::-webkit-slider-runnable-track {
+          height: 6px;
+          background: rgba(255,255,255,0.18);
+          border-radius: 3px;
+        }
+        .ml-opacity-slider::-moz-range-track {
+          height: 6px;
+          background: rgba(255,255,255,0.18);
+          border-radius: 3px;
+        }
+      `;
+      document.head.appendChild(sliderStyle);
+    }
     const opacityValueSpan = document.createElement('span');
     opacityValueSpan.textContent = `${opacityInput.value}%`;
     opacityValueSpan.style.cssText = 'color: #fff; font-size: 11px; min-width: 30px; text-align: center;';
@@ -970,7 +1055,7 @@ export class PDFExporter {
       border: none; border-radius: 4px; cursor: pointer;
       pointer-events: auto; white-space: nowrap;
     `;
-    btnDelete.addEventListener('mousedown', (e) => {
+    btnDelete.addEventListener('mousedown', async (e) => {
       e.stopPropagation();
       e.preventDefault();
       // 🔧 记录被删除的 MergedDialog ID，持久化时从缓存中移除
@@ -982,6 +1067,8 @@ export class PDFExporter {
       this.callbacks.onSaveEdits('', []);
       overlay.remove();
       this.clearEditingState();
+      // 🔧 删除后立即静默保存，避免刷新后删除丢失
+      try { await this.callbacks.onAutoSave(); } catch {}
     });
 
     // 确认按钮
@@ -993,11 +1080,13 @@ export class PDFExporter {
       border: none; border-radius: 4px; cursor: pointer;
       pointer-events: auto; white-space: nowrap;
     `;
-    btnDone.addEventListener('mousedown', (e) => {
+    btnDone.addEventListener('mousedown', async (e) => {
       e.stopPropagation();
       e.preventDefault();
       this.callbacks.onSaveEdits('', []);
       this.clearEditingState();
+      // 🔧 确认后立即静默持久化（字体/透明度/位置/删除）避免刷新后编辑丢失
+      try { await this.callbacks.onAutoSave(); } catch {}
     });
 
     toolbar.appendChild(fontSizeGroup);
@@ -1068,49 +1157,62 @@ export class PDFExporter {
     await this.generatePDF(targets);
   }
 
-  /** 执行PDF生成 */
+  /** 执行PDF生成 — 分块生成 → pdf-lib二进制合并 → 单个PDF下载 */
   async generatePDF(targets: ExportTarget[]): Promise<void> {
+    // 🔧 导出前自动静默保存所有编辑（消除"导出→保存→刷新后编辑丢失"的问题）
+    try {
+      await this.callbacks.onAutoSave();
+      console.log('[PDFExport] ✅ 编辑已在导出前自动保存');
+    } catch (e) {
+      console.warn('[PDFExport] ⚠️ 自动保存失败，继续导出:', e);
+    }
+
     this.showProgressBar(0, targets.length);
     this.hideUIForScreenshot();
 
-    // 🔧 预拉取所有跨域图片为 data URL（通过 background service worker，不受 CORS 限制）
-    const originalSrcs = new Map<HTMLImageElement, string>();
+    // 🔧 预拉取所有跨域图片为 data URL
     try {
-      await this.prefetchImageDataUrls(targets, originalSrcs);
+      await this.prefetchImageDataUrls(targets);
     } catch (e) {
       console.warn('[PDFExport] 图片预拉取部分失败，将尝试降级方案:', e);
     }
 
-    // 🔧 等待所有替换后的图片加载完毕
-    await this.waitForImagesToLoad(targets);
+    const CHUNK_SIZE = 8; // 每分块最多8页，保证 jsPDF 内部字符串不超限
+    const totalChunks = Math.ceil(targets.length / CHUNK_SIZE);
+    const dateStr = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
+    const filename = `${this.savePath ? this.savePath + '/' : ''}manga-${dateStr}.pdf`;
+    const PDF_PAGE_WIDTH = 210; // mm (A4)
 
-    try {
+    // ── 阶段一：逐块生成 jsPDF，收集 ArrayBuffer ──
+    const chunkBuffers: ArrayBuffer[] = [];
+
+    for (let chunk = 0; chunk < totalChunks; chunk++) {
+      const start = chunk * CHUNK_SIZE;
+      const end = Math.min(start + CHUNK_SIZE, targets.length);
+      const chunkTargets = targets.slice(start, end);
+
       const pdf = new jsPDF({
         orientation: 'portrait',
         unit: 'mm',
         format: 'a4'
       });
 
-      const PDF_PAGE_WIDTH = 210; // mm
-
-      for (let i = 0; i < targets.length; i++) {
-        const target = targets[i];
-        this.updateProgressBar(i + 1, targets.length);
+      for (let i = 0; i < chunkTargets.length; i++) {
+        const globalIndex = start + i;
+        const target = chunkTargets[i];
+        this.updateProgressBar(globalIndex + 1, targets.length);
 
         try {
-          // 🔧 手动合成：图片 + 覆盖层文字 → canvas
           const canvas = await this.compositeImageWithOverlays(target);
-
           const imgRatio = canvas.height / canvas.width;
           const pageHeight = Math.min(PDF_PAGE_WIDTH * imgRatio, 594);
 
           if (i > 0) pdf.addPage([PDF_PAGE_WIDTH, pageHeight]);
-          const canvasDataUrl = canvas.toDataURL('image/png');
-          pdf.addImage(canvasDataUrl, 'PNG', 0, 0, PDF_PAGE_WIDTH, pageHeight);
+          const jpegDataUrl = canvas.toDataURL('image/jpeg', 0.92);
+          pdf.addImage(jpegDataUrl, 'JPEG', 0, 0, PDF_PAGE_WIDTH, pageHeight);
 
         } catch (compositeError) {
           console.warn(`[PDFExport] 合成失败 (${target.imageSrc}):`, compositeError);
-          // 降级：使用 data URL 直接在 canvas 上绘制纯图片
           try {
             const dataUrl = this.imageDataUrlCache.get(target.imageSrc);
             if (!dataUrl) throw new Error('无缓存 data URL');
@@ -1129,7 +1231,8 @@ export class PDFExporter {
               const pageHeight = Math.min(PDF_PAGE_WIDTH * imgRatio, 594);
 
               if (i > 0) pdf.addPage([PDF_PAGE_WIDTH, pageHeight]);
-              pdf.addImage(canvas.toDataURL('image/png'), 'PNG', 0, 0, PDF_PAGE_WIDTH, pageHeight);
+              const jpegDataUrl = canvas.toDataURL('image/jpeg', 0.92);
+              pdf.addImage(jpegDataUrl, 'JPEG', 0, 0, PDF_PAGE_WIDTH, pageHeight);
             }
           } catch (fallbackError) {
             console.error(`[PDFExport] 降级方案也失败:`, fallbackError);
@@ -1137,11 +1240,27 @@ export class PDFExporter {
         }
       }
 
-      // 触发下载
-      const dateStr = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
-      const filename = `${this.savePath ? this.savePath + '/' : ''}manga-${dateStr}.pdf`;
-      const pdfBlob = pdf.output('blob');
-      const blobUrl = URL.createObjectURL(pdfBlob);
+      // 取出 ArrayBuffer（8页以内不会触发字符串上限）
+      chunkBuffers.push(pdf.output('arraybuffer') as ArrayBuffer);
+      console.log(`[PDFExport] 📦 分块 ${chunk + 1}/${totalChunks} 已生成 (${chunkTargets.length}页)`);
+    }
+
+    // ── 阶段二：pdf-lib 二进制合并 ──
+    try {
+      const mergedPdf = await PDFDocument.create();
+
+      for (let i = 0; i < chunkBuffers.length; i++) {
+        const srcDoc = await PDFDocument.load(chunkBuffers[i]);
+        const pageIndices = [...Array(srcDoc.getPageCount()).keys()];
+        const copiedPages = await mergedPdf.copyPages(srcDoc, pageIndices);
+        for (const page of copiedPages) {
+          mergedPdf.addPage(page);
+        }
+      }
+
+      const mergedBytes = await mergedPdf.save();
+      const mergedBlob = new Blob([mergedBytes], { type: 'application/pdf' });
+      const blobUrl = URL.createObjectURL(mergedBlob);
 
       chrome.runtime.sendMessage({
         target: 'background',
@@ -1151,26 +1270,40 @@ export class PDFExporter {
         saveAs: false
       });
 
-    } catch (error) {
-      console.error('[PDFExport] PDF生成失败:', error);
-      alert('PDF 生成失败，请查看控制台了解详情');
-    } finally {
-      // 🔧 恢复原始图片 src
-      for (const [img, originalSrc] of originalSrcs) {
-        img.src = originalSrc;
+      console.log(`[PDFExport] ✅ 合并PDF下载: ${filename} (${targets.length}页, ${totalChunks}块合并)`);
+
+    } catch (mergeError) {
+      console.error('[PDFExport] ⚠️ pdf-lib合并失败，降级为分块下载:', mergeError);
+      // 降级：逐个下载分块
+      for (let i = 0; i < chunkBuffers.length; i++) {
+        const partLabel = `_part${i + 1}of${totalChunks}`;
+        const partFilename = `${this.savePath ? this.savePath + '/' : ''}manga-${dateStr}${partLabel}.pdf`;
+        const blob = new Blob([chunkBuffers[i]], { type: 'application/pdf' });
+        const blobUrl = URL.createObjectURL(blob);
+
+        chrome.runtime.sendMessage({
+          target: 'background',
+          type: 'DOWNLOAD_PDF',
+          url: blobUrl,
+          filename: partFilename,
+          saveAs: false
+        });
+        console.log(`[PDFExport] 📄 降级分块下载: ${partFilename}`);
+        if (i < chunkBuffers.length - 1) await this.sleep(300);
       }
-      this.imageDataUrlCache.clear();
-      this.restoreUIAfterScreenshot();
-      this.removeProgressBar();
     }
 
-    console.log(`[PDFExport] ✅ PDF生成完成: ${targets.length}张图片`);
+    // 清理
+    this.imageDataUrlCache.clear();
+    this.restoreUIAfterScreenshot();
+    this.removeProgressBar();
+
+    console.log(`[PDFExport] 🎉 PDF生成完成: ${targets.length}张图片`);
   }
 
-  /** 通过 background service worker 预拉取跨域图片为 data URL，并临时替换 img.src */
+  /** 通过 background service worker 预拉取跨域图片为 data URL（仅填缓存，不改 DOM img.src） */
   private async prefetchImageDataUrls(
-    targets: ExportTarget[],
-    originalSrcs: Map<HTMLImageElement, string>
+    targets: ExportTarget[]
   ): Promise<void> {
     const uniqueUrls = [...new Set(targets.map(t => t.imageSrc))];
 
@@ -1199,15 +1332,10 @@ export class PDFExporter {
       })
     );
 
-    // 替换图片 src 为 data URL
-    for (const target of targets) {
-      const dataUrl = this.imageDataUrlCache.get(target.imageSrc);
-      if (dataUrl && dataUrl !== target.imageSrc) {
-        originalSrcs.set(target.imageElement, target.imageSrc);
-        target.imageElement.src = dataUrl;
-      }
-    }
-
+    // 🔧 不再替换 DOM img.src 为 data URL，避免触发图片重新加载和
+    //     后续 image detector 重新渲染覆盖所有用户编辑。
+    //     compositeImageWithOverlays 通过 loadImageFromDataUrl 读取缓存，
+    //     创建离屏 Image 对象用于 canvas 渲染，DOM 图片完全不受影响。
     const successCount = results.filter(r => r.status === 'fulfilled').length;
     const failCount = results.filter(r => r.status === 'rejected').length;
     console.log(`[PDFExport] 📥 图片预拉取: ${successCount} 成功, ${failCount} 失败 (共 ${uniqueUrls.length} 张)`);
@@ -1233,30 +1361,9 @@ export class PDFExporter {
     });
   }
 
-  /** 等待所有替换了 src 的图片加载完毕 */
-  private async waitForImagesToLoad(targets: ExportTarget[]): Promise<void> {
-    const promises = targets
-      .filter(t => t.imageElement.complete === false)
-      .map(t => new Promise<void>((resolve) => {
-        const onLoad = () => {
-          t.imageElement.removeEventListener('load', onLoad);
-          t.imageElement.removeEventListener('error', onLoad);
-          resolve();
-        };
-        t.imageElement.addEventListener('load', onLoad);
-        t.imageElement.addEventListener('error', onLoad);
-        // 超时保护
-        setTimeout(() => {
-          t.imageElement.removeEventListener('load', onLoad);
-          t.imageElement.removeEventListener('error', onLoad);
-          resolve();
-        }, 5000);
-      }));
-
-    if (promises.length > 0) {
-      await Promise.all(promises);
-      console.log(`[PDFExport] 📸 等待 ${promises.length} 张图片加载完毕`);
-    }
+  /** 延迟辅助函数 */
+  private sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
   }
 
   /**
@@ -1353,14 +1460,45 @@ export class PDFExporter {
       ctx.textBaseline = 'middle';
 
       if (writingMode === 'vertical-rl') {
-        // 竖排文字
+        // 竖排文字 — 支持多列：从右到左排列，每列从上到下填充
         ctx.textAlign = 'center';
         const chars = [...text];
-        const charSize = Math.min(fontSize, oh / (chars.length + 1));
-        ctx.font = `${charSize}px ${fontFamily}`;
-        for (let ci = 0; ci < chars.length; ci++) {
-          const cy = oy + padding + (ci + 0.5) * (oh - padding * 2) / chars.length;
-          ctx.fillText(chars[ci], ox + ow / 2, cy);
+        const colHeight = oh - padding * 2;
+        if (colHeight <= 0) { ctx.restore(); continue; }
+
+        // 计算当前字号下每列最多容纳的字符数
+        const charGap = fontSize * 1.25;
+        const maxPerCol = Math.max(1, Math.floor(colHeight / charGap));
+        const totalCols = Math.ceil(chars.length / maxPerCol);
+
+        // 计算每列实际可用宽度
+        const usableWidth = ow - padding * 2;
+        const colWidth = Math.max(fontSize, usableWidth / totalCols);
+        // 如果总列宽超出可用宽度，缩小字号
+        let drawSize = fontSize;
+        if (colWidth * totalCols > usableWidth && drawSize > 4) {
+          drawSize = Math.max(4, usableWidth / (totalCols * 1.1));
+        }
+        // 如果列数太多导致字号小于4，限制最大列数
+        const effectiveMaxCols = Math.max(1, Math.floor(usableWidth / 4));
+        const effectiveCols = Math.min(totalCols, effectiveMaxCols);
+        const perCol = Math.ceil(chars.length / effectiveCols);
+        const actualSize = Math.min(drawSize, colHeight / (perCol * 1.2), usableWidth / effectiveCols);
+
+        ctx.font = `${actualSize}px ${fontFamily}`;
+        const actualGap = actualSize * 1.25;
+
+        // 从右到左绘制各列 (vertical-rl: 右→左, 上→下)
+        for (let col = 0; col < effectiveCols; col++) {
+          const colChars = chars.slice(col * perCol, (col + 1) * perCol);
+          // 列中心 x 坐标：从右边界向左偏移
+          const colCenterX = ox + ow - padding - colWidth * (col + 0.5);
+          const colTopY = oy + padding + (colHeight - colChars.length * actualGap) / 2;
+
+          for (let ci = 0; ci < colChars.length; ci++) {
+            const cy = colTopY + (ci + 0.5) * actualGap;
+            ctx.fillText(colChars[ci], colCenterX, cy);
+          }
         }
       } else {
         // 横排文字 — 使用自适应字号确保不溢出
@@ -1602,5 +1740,6 @@ export const pdfExporter = new PDFExporter({
   getOverlaysForImage: () => [],
   getTranslatedImages: () => [],
   onExitRequest: () => {},
-  onSaveEdits: () => {}
+  onSaveEdits: () => {},
+  onAutoSave: async () => {}
 });

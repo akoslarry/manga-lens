@@ -796,6 +796,10 @@ async function initialize(): Promise<void> {
       onExitRequest: () => handlePdfModeExit(),
       onSaveEdits: (_imageSrc: string, _overlays: HTMLElement[]) => {
         pdfModeEditDirty = true;
+      },
+      onAutoSave: async () => {
+        // 🔧 导出PDF前的静默自动保存（无需用户确认，同"保留修改"逻辑）
+        await handlePdfModeAutoSave();
       }
     });
 
@@ -865,17 +869,23 @@ window.addEventListener('manga-lens-rerender', async (event: Event) => {
 // ============================================
 
 async function handlePdfModeExit(): Promise<void> {
-  // 如果用户没有任何编辑操作，直接退出无需确认
-  if (!pdfModeEditDirty) {
-    pdfExporter.exitPdfMode();
-    pdfModeSavePath = '';
-    return;
+  // 🔧 退出前始终静默持久化当前编辑状态（防止 resize/文字编辑等未触发脏标记的修改丢失）
+  if (pdfModeEditDirty) {
+    console.log('[MangaLens] 🔄 退出PDF模式前自动保存编辑...');
+    await handlePdfModeAutoSave();
   }
 
-  const shouldRestore = confirm('是否恢复翻译原状？\n\n选择"确定"：丢弃手动修改，恢复原始翻译\n选择"取消"：保留您的修改，覆盖原始翻译结果');
+  // 🔧 增加保护：即使 dirty 标记未设置，也可能存在未保存的覆盖层状态
+  //    （如 resize、纯文字编辑等未调用 onSaveEdits 的场景）
+  //    通过检查覆盖层快照与缓存的差异来决定是否弹确认窗
+  const confirmMessage = '即将退出PDF导出模式。\n\n' +
+    '点击"保留修改"：保存您的手动调整，覆盖原始翻译结果\n' +
+    '点击"恢复原状"：丢弃手动修改，恢复到翻译时的原始状态';
+
+  const shouldRestore = confirm(confirmMessage);
 
   if (shouldRestore) {
-    // 恢复原状：从缓存重新渲染所有图片
+    // 用户选择"确定"=恢复原状：从缓存重新渲染所有图片
     console.log('[MangaLens] 用户选择恢复原状，从缓存重新渲染');
     const images = overlayManager.getAllTranslatedImages();
     for (const img of images) {
@@ -884,13 +894,13 @@ async function handlePdfModeExit(): Promise<void> {
         overlayManager.rerenderFromCache(img, cachedDialogs);
       }
     }
-    pdfModeEditDirty = false;
   } else {
-    // 保留修改：覆盖本地缓存
+    // 用户选择"取消"=保留修改：覆盖本地缓存
     console.log('[MangaLens] 用户选择保留修改，持久化到本地缓存');
     const customFontSizes = pdfExporter.getCustomFontSizes(); // overlayId → px
 
     const images = overlayManager.getAllTranslatedImages();
+    let savedCount = 0;
     for (const img of images) {
       // 从当前缓存数据读取（因为数据结构不变，只是位置/文字被用户改了）
       const cachedDialogs = await translationCache.get(img.src);
@@ -967,13 +977,89 @@ async function handlePdfModeExit(): Promise<void> {
         }
       }
       await translationCache.set(img.src, cachedDialogs);
+      savedCount++;
     }
-    console.log('[MangaLens] ✅ 用户修改已持久化到本地缓存');
+    console.log(`[MangaLens] ✅ 用户修改已持久化到本地缓存 (${savedCount} 张图片)`);
   }
 
+  pdfModeEditDirty = false;
   // 执行退出
   pdfExporter.exitPdfMode();
   pdfModeSavePath = '';
+}
+
+/** 导出PDF前的静默自动保存（无需用户确认，同"保留修改"逻辑） */
+async function handlePdfModeAutoSave(): Promise<void> {
+  if (!pdfModeEditDirty) return; // 无修改，无需保存
+
+  console.log('[MangaLens] 🔄 导出前自动保存编辑...');
+  const customFontSizes = pdfExporter.getCustomFontSizes();
+  const customOpacities = pdfExporter.getCustomOpacities();
+  const deletedIds = pdfExporter.getDeletedDialogIds();
+
+  const images = overlayManager.getAllTranslatedImages();
+  for (const img of images) {
+    const cachedDialogs = await translationCache.get(img.src);
+    if (!cachedDialogs) continue;
+
+    // 收集当前覆盖层快照
+    const snapshots = overlayManager.collectOverlaySnapshots(img);
+
+    // 将文字修改和位置反映回 MergedDialog
+    for (const snap of snapshots) {
+      for (const [id, overlay] of (overlayManager as any).overlays) {
+        if (id === snap.id) {
+          for (const dialog of cachedDialogs) {
+            const box = dialog.boundingBox;
+            const origBox = overlay.originalBox;
+            if (box.x === origBox.x && box.y === origBox.y && box.width === origBox.width) {
+              dialog.translatedText = snap.text;
+              dialog.customStyle = {
+                left: snap.left,
+                top: snap.top,
+                width: snap.width,
+                height: snap.height,
+              };
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    // 持久化自定义字体大小
+    const overlays = overlayManager.getOverlaysForImage(img);
+    for (const overlay of overlays) {
+      const overlayId = overlay.id;
+      if (customFontSizes.has(overlayId)) {
+        const fontSize = customFontSizes.get(overlayId)!;
+        const dialogId = parseInt(overlay.dataset.dialogId || '', 10);
+        if (!isNaN(dialogId)) {
+          const dialog = cachedDialogs.find((d: any) => d.id === dialogId);
+          if (dialog) { dialog.customFontSize = fontSize; }
+        }
+      }
+      if (customOpacities.has(overlayId)) {
+        const opacity = customOpacities.get(overlayId)!;
+        const dialogId = parseInt(overlay.dataset.dialogId || '', 10);
+        if (!isNaN(dialogId)) {
+          const dialog = cachedDialogs.find((d: any) => d.id === dialogId);
+          if (dialog) { dialog.customOpacity = opacity; }
+        }
+      }
+    }
+
+    // 移除已删除对话框
+    if (deletedIds.size > 0) {
+      const filtered = cachedDialogs.filter((d: any) => !deletedIds.has(d.id));
+      cachedDialogs.length = 0;
+      cachedDialogs.push(...filtered);
+    }
+
+    await translationCache.set(img.src, cachedDialogs);
+  }
+  pdfModeEditDirty = false;
+  console.log('[MangaLens] ✅ 编辑已自动保存到本地缓存');
 }
 
 // Listen for messages from popup or background
