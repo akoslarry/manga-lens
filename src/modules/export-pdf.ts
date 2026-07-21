@@ -45,8 +45,7 @@ export interface PDFExporterCallbacks {
 export class PDFExporter {
   private isPdfMode = false;
   private savePath = '';
-  private selectedImages = new Map<string, number>(); // imageSrc → 选中序号(1-based)
-  private selectionCounter = 0;                        // 累加选中序号
+  private selectedImages = new Set<string>(); // 选中的 imageSrc（无排序，导出时按DOM位置排）
   private toolbar: HTMLElement | null = null;
   private progressBar: HTMLElement | null = null;
   private checkboxes: Map<string, HTMLElement> = new Map(); // imageSrc → 选择框元素
@@ -100,7 +99,6 @@ export class PDFExporter {
     this.isPdfMode = true;
     this.savePath = savePath;
     this.selectedImages.clear();
-    this.selectionCounter = 0;
 
     // 1. 创建浮动工具栏
     this.createToolbar();
@@ -141,7 +139,6 @@ export class PDFExporter {
 
     this.isPdfMode = false;
     this.selectedImages.clear();
-    this.selectionCounter = 0;
 
     console.log('[PDFExport] ❌ 退出PDF导出模式');
   }
@@ -285,22 +282,7 @@ export class PDFExporter {
     checkbox.title = '点击切换选中/取消';
 
     // 默认选中
-    this.selectionCounter++;
-    this.selectedImages.set(imageSrc, this.selectionCounter);
-
-    // 序号角标
-    const badge = document.createElement('div');
-    badge.className = 'manga-lens-pdf-order-badge';
-    badge.style.cssText = `
-      position: absolute; top: -6px; right: -6px;
-      width: 18px; height: 18px;
-      background: #ff9800; color: #fff;
-      border-radius: 50%; font-size: 10px;
-      text-align: center; line-height: 18px;
-      font-weight: 600; pointer-events: none;
-    `;
-    badge.textContent = String(this.selectionCounter);
-    checkbox.appendChild(badge);
+    this.selectedImages.add(imageSrc);
 
     // 挂载到 body，使用 fixed 定位
     document.body.appendChild(checkbox);
@@ -384,32 +366,12 @@ export class PDFExporter {
       checkbox.classList.remove('selected');
       const checkMark = checkbox.querySelector('.ml-pdf-check-mark') as HTMLElement;
       if (checkMark) checkMark.style.display = 'none';
-      // 移除序号角标
-      const badge = checkbox.querySelector('.manga-lens-pdf-order-badge');
-      if (badge) badge.remove();
     } else {
       // 选中
-      this.selectionCounter++;
-      this.selectedImages.set(imageSrc, this.selectionCounter);
+      this.selectedImages.add(imageSrc);
       checkbox.classList.add('selected');
       const checkMark = checkbox.querySelector('.ml-pdf-check-mark') as HTMLElement;
       if (checkMark) checkMark.style.display = '';
-      // 添加序号角标
-      let badge = checkbox.querySelector('.manga-lens-pdf-order-badge') as HTMLElement;
-      if (!badge) {
-        badge = document.createElement('div');
-        badge.className = 'manga-lens-pdf-order-badge';
-        badge.style.cssText = `
-          position: absolute; top: -6px; right: -6px;
-          width: 18px; height: 18px;
-          background: #ff9800; color: #fff;
-          border-radius: 50%; font-size: 10px;
-          text-align: center; line-height: 18px;
-          font-weight: 600; pointer-events: none;
-        `;
-        checkbox.appendChild(badge);
-      }
-      badge.textContent = String(this.selectionCounter);
     }
 
     this.updateToolbarCounts();
@@ -431,21 +393,15 @@ export class PDFExporter {
     if (this.selectedImages.size === images.length && images.length > 0) {
       // 取消全选
       this.selectedImages.clear();
-      this.selectionCounter = 0;
       this.checkboxes.forEach((checkbox) => {
         checkbox.classList.remove('selected');
         const checkMark = checkbox.querySelector('.ml-pdf-check-mark') as HTMLElement;
         if (checkMark) checkMark.style.display = 'none';
-        const badge = checkbox.querySelector('.manga-lens-pdf-order-badge');
-        if (badge) badge.remove();
       });
     } else {
-      // 全选（保持当前计数器继续累加）
+      // 全选
       for (const img of images) {
-        if (!this.selectedImages.has(img.src)) {
-          this.selectionCounter++;
-          this.selectedImages.set(img.src, this.selectionCounter);
-        }
+        this.selectedImages.add(img.src);
       }
       // 更新选择框UI
       this.checkboxes.forEach((checkbox, src) => {
@@ -453,21 +409,6 @@ export class PDFExporter {
           checkbox.classList.add('selected');
           const checkMark = checkbox.querySelector('.ml-pdf-check-mark') as HTMLElement;
           if (checkMark) checkMark.style.display = '';
-          let badge = checkbox.querySelector('.manga-lens-pdf-order-badge') as HTMLElement;
-          if (!badge) {
-            badge = document.createElement('div');
-            badge.className = 'manga-lens-pdf-order-badge';
-            badge.style.cssText = `
-              position: absolute; top: -6px; right: -6px;
-              width: 18px; height: 18px;
-              background: #ff9800; color: #fff;
-              border-radius: 50%; font-size: 10px;
-              text-align: center; line-height: 18px;
-              font-weight: 600; pointer-events: none;
-            `;
-            checkbox.appendChild(badge);
-          }
-          badge.textContent = String(this.selectedImages.get(src));
         }
       });
     }
@@ -501,23 +442,17 @@ export class PDFExporter {
         imageElement: img,
         containerElement: overlays[0]?.parentElement || parent,
         parentElement: parent,
-        pageOrder: selectedOnly ? (this.selectedImages.get(img.src) || 0) : targets.length + 1
+        pageOrder: 0
       });
     }
 
-    // 按页码排序
-    if (selectedOnly) {
-      targets.sort((a, b) => a.pageOrder - b.pageOrder);
-    }
-    // 全部导出按DOM顺序（getBoundingClientRect().top 排序）
-    else {
-      targets.sort((a, b) => {
-        const aTop = a.imageElement.getBoundingClientRect().top;
-        const bTop = b.imageElement.getBoundingClientRect().top;
-        return aTop - bTop;
-      });
-      targets.forEach((t, i) => t.pageOrder = i + 1);
-    }
+    // 统一按图片在网页中的DOM位置从上到下排序
+    targets.sort((a, b) => {
+      const aTop = a.imageElement.getBoundingClientRect().top;
+      const bTop = b.imageElement.getBoundingClientRect().top;
+      return aTop - bTop;
+    });
+    targets.forEach((t, i) => t.pageOrder = i + 1);
 
     return targets;
   }
@@ -607,6 +542,9 @@ export class PDFExporter {
     overlay.addEventListener('mouseenter', this._onOverlayHover);
     overlay.addEventListener('mouseleave', this._onOverlayLeave);
 
+    // 阻止点击冒泡到 &lt;a&gt; 标签导致页面跳转
+    overlay.addEventListener('click', this._onOverlayClick);
+
     // 双击进入编辑态
     overlay.addEventListener('dblclick', this._onOverlayDblClick);
   }
@@ -620,6 +558,7 @@ export class PDFExporter {
 
     overlay.removeEventListener('mouseenter', this._onOverlayHover);
     overlay.removeEventListener('mouseleave', this._onOverlayLeave);
+    overlay.removeEventListener('click', this._onOverlayClick);
     overlay.removeEventListener('dblclick', this._onOverlayDblClick);
     overlay.contentEditable = 'false';
     overlay.removeAttribute('contenteditable');
@@ -634,11 +573,12 @@ export class PDFExporter {
 
   /** 拦截容器背景点击，阻止穿透到 &lt;a&gt; 标签导致页面跳转 */
   private _onContainerClick = (e: Event) => {
-    const target = e.target as HTMLElement;
-    // 不拦截覆盖层及其子元素的点击（编辑工具栏、resize手柄等）
-    if (target.closest('.manga-lens-text-overlay') || target.closest('.ml-overlay-edit-toolbar') || target.closest('.ml-resize-handle')) {
-      return;
-    }
+    e.stopPropagation();
+    e.preventDefault();
+  };
+
+  /** 拦截覆盖层本身点击，阻止事件冒泡到 &lt;a&gt; 标签导致跳转 */
+  private _onOverlayClick = (e: Event) => {
     e.stopPropagation();
     e.preventDefault();
   };
@@ -672,6 +612,7 @@ export class PDFExporter {
     this.editingOverlay = overlay;
     overlay.style.outline = '2px solid #667eea';
     overlay.style.zIndex = '10';
+    overlay.style.overflow = 'visible'; // 确保工具栏不被裁剪
 
     // 文字可编辑
     overlay.contentEditable = 'true';
@@ -693,6 +634,7 @@ export class PDFExporter {
 
     this.editingOverlay.style.outline = '';
     this.editingOverlay.style.zIndex = '1';
+    this.editingOverlay.style.overflow = '';
     this.editingOverlay.contentEditable = 'false';
     this.editingOverlay.removeAttribute('contenteditable');
     this.editingOverlay.removeEventListener('mousedown', this._onDragStart);
@@ -864,7 +806,8 @@ export class PDFExporter {
     const toolbar = document.createElement('div');
     toolbar.className = 'ml-overlay-edit-toolbar';
     toolbar.style.cssText = `
-      position: absolute; bottom: -34px; left: 0; right: 0;
+      position: absolute; top: 100%; left: 0;
+      margin-top: 4px;
       display: flex; gap: 4px; justify-content: center; align-items: center;
       z-index: 20; pointer-events: auto; white-space: nowrap;
     `;
