@@ -144,6 +144,20 @@
       </div>
     </div>
 
+    <!-- PDF导出卡片 -->
+    <div class="card">
+      <div class="card-title">📄 PDF导出</div>
+      <div class="form-group">
+        <label class="form-label">保存子目录（可选）</label>
+        <input type="text" class="form-input" id="pdfSavePath" placeholder="默认下载目录" value="manga-exports">
+        <p class="form-hint">PDF将保存至 下载目录/此子目录 中</p>
+      </div>
+      <button class="btn btn-primary" id="btnEnterPdfMode">
+        📄 进入PDF导出模式
+      </button>
+      <p class="form-hint" style="margin-top: 6px;">进入后可双击编辑翻译文字，选择图片后导出PDF</p>
+    </div>
+
     <!-- 操作卡片 -->
     <div class="card">
       <div class="card-title">操作</div>
@@ -174,7 +188,7 @@
     <!-- 页脚 -->
     <div class="footer">
       <p>MangaLens 漫画实时翻译</p>
-      <p>v3.0 | 高精度OCR · 直接API</p>
+      <p>v4.0 | 高精度OCR · DeepSeek翻译 · PDF导出</p>
     </div>
   </div>
 
