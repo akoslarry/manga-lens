@@ -745,6 +745,14 @@ export class TranslationOverlayManager {
     let width = (pixelWidth / safeContainerWidth) * 100;
     let height = (pixelHeight / safeContainerHeight) * 100;
     
+    // 🔧 如果用户已自定义位置/尺寸，使用用户保存的值
+    if (dialog.customStyle) {
+      if (dialog.customStyle.left !== undefined) left = parseFloat(dialog.customStyle.left);
+      if (dialog.customStyle.top !== undefined) top = parseFloat(dialog.customStyle.top);
+      if (dialog.customStyle.width !== undefined) width = parseFloat(dialog.customStyle.width);
+      if (dialog.customStyle.height !== undefined) height = parseFloat(dialog.customStyle.height);
+    }
+
     // 限制百分比在 0-100 范围内（防止溢出到可见区域外）
     // 但允许少量溢出（-5% 到 105%），因为某些情况下需要稍微超出边界
     left = Math.max(-10, Math.min(110, left));
@@ -786,9 +794,15 @@ export class TranslationOverlayManager {
     overlay.dataset.dialogId = String(dialog.id); // 关联 MergedDialog，用于持久化单覆盖层字体大小
 
     // 计算字体大小（基于原文平均字符宽度和翻译后字符数）
-    const baseFontSize = this.calculateFontSizeForDialog(dialog, translatedText, safeBounds.width, cfg);
-    const fontScale = this.getFontScale(imageElement);
-    const fontSize = baseFontSize * fontScale;
+    // 🔧 如果用户保存了自定义字体大小，优先使用
+    let fontSize: number;
+    if (dialog.customFontSize) {
+      fontSize = dialog.customFontSize;
+    } else {
+      const baseFontSize = this.calculateFontSizeForDialog(dialog, translatedText, safeBounds.width, cfg);
+      const fontScale = this.getFontScale(imageElement);
+      fontSize = baseFontSize * fontScale;
+    }
     
     // 构建样式
     const bgWithOpacity = this.hexToRgba(cfg.background, cfg.backgroundOpacity);

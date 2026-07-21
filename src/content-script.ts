@@ -910,6 +910,13 @@ async function handlePdfModeExit(): Promise<void> {
               const origBox = overlay.originalBox;
               if (box.x === origBox.x && box.y === origBox.y && box.width === origBox.width) {
                 dialog.translatedText = snap.text;
+                // 🔧 持久化用户自定义的位置和尺寸
+                dialog.customStyle = {
+                  left: snap.left,
+                  top: snap.top,
+                  width: snap.width,
+                  height: snap.height,
+                };
                 break;
               }
             }

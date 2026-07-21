@@ -63,6 +63,13 @@ export interface MergedDialog {
   isVertical?: boolean;
   /** 用户手动设定的每个覆盖层字体大小（px），null/undefined 表示使用默认 */
   customFontSize?: number;
+  /** 用户手动设定的覆盖层位置和尺寸（百分比），null/undefined 表示使用自动计算值 */
+  customStyle?: {
+    left?: string;
+    top?: string;
+    width?: string;
+    height?: string;
+  };
 }
 
 /** 翻译后的对话（带完整翻译信息） */

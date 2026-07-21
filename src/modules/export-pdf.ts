@@ -4,11 +4,10 @@
  * 功能：
  * 1. PDF模式浮动工具栏（导出全部/导出选中/全选/退出）
  * 2. 图片选择框（手动勾选导出目标，记录选中顺序）
- * 3. PDF生成（html2canvas截图 + jsPDF写入，每图一页）
+ * 3. PDF生成（手动合成图片+覆盖层 → jsPDF写入，每图一页）
  * 4. 进度条反馈
  */
 
-import html2canvas from 'html2canvas';
 import { jsPDF } from 'jspdf';
 
 // ============================================
@@ -718,6 +717,11 @@ export class PDFExporter {
 
     this.editingOverlay.style.left = `${Math.max(0, Math.min(100, leftPercent))}%`;
     this.editingOverlay.style.top = `${Math.max(0, Math.min(100, topPercent))}%`;
+
+    // 🔧 拖拽过程中同步更新工具栏位置
+    if (this.editingToolbar) {
+      this.updateToolbarPosition(this.editingOverlay);
+    }
   };
 
   private _onDragEnd = () => {
@@ -981,6 +985,9 @@ export class PDFExporter {
       console.warn('[PDFExport] 图片预拉取部分失败，将尝试降级方案:', e);
     }
 
+    // 🔧 等待所有替换后的图片加载完毕
+    await this.waitForImagesToLoad(targets);
+
     try {
       const pdf = new jsPDF({
         orientation: 'portrait',
@@ -995,15 +1002,8 @@ export class PDFExporter {
         this.updateProgressBar(i + 1, targets.length);
 
         try {
-          // html2canvas：图片已替换为 data URL，无需 CORS
-          const canvas = await html2canvas(target.parentElement, {
-            allowTaint: true,
-            scale: 1,
-            backgroundColor: '#ffffff',
-            logging: false,
-            windowWidth: target.parentElement.scrollWidth,
-            windowHeight: target.parentElement.scrollHeight,
-          });
+          // 🔧 手动合成：图片 + 覆盖层文字 → canvas
+          const canvas = await this.compositeImageWithOverlays(target);
 
           const imgRatio = canvas.height / canvas.width;
           const pageHeight = Math.min(PDF_PAGE_WIDTH * imgRatio, 594);
@@ -1012,9 +1012,9 @@ export class PDFExporter {
           const canvasDataUrl = canvas.toDataURL('image/png');
           pdf.addImage(canvasDataUrl, 'PNG', 0, 0, PDF_PAGE_WIDTH, pageHeight);
 
-        } catch (html2canvasError) {
-          console.warn(`[PDFExport] html2canvas 失败 (${target.imageSrc}):`, html2canvasError);
-          // 降级：使用 data URL 直接在 canvas 上绘制
+        } catch (compositeError) {
+          console.warn(`[PDFExport] 合成失败 (${target.imageSrc}):`, compositeError);
+          // 降级：使用 data URL 直接在 canvas 上绘制纯图片
           try {
             const dataUrl = this.imageDataUrlCache.get(target.imageSrc);
             if (!dataUrl) throw new Error('无缓存 data URL');
@@ -1037,7 +1037,6 @@ export class PDFExporter {
             }
           } catch (fallbackError) {
             console.error(`[PDFExport] 降级方案也失败:`, fallbackError);
-            // 跳过这张图
           }
         }
       }
@@ -1136,6 +1135,246 @@ export class PDFExporter {
       img.onerror = () => reject(new Error('data URL 图片加载失败'));
       img.src = dataUrl;
     });
+  }
+
+  /** 等待所有替换了 src 的图片加载完毕 */
+  private async waitForImagesToLoad(targets: ExportTarget[]): Promise<void> {
+    const promises = targets
+      .filter(t => t.imageElement.complete === false)
+      .map(t => new Promise<void>((resolve) => {
+        const onLoad = () => {
+          t.imageElement.removeEventListener('load', onLoad);
+          t.imageElement.removeEventListener('error', onLoad);
+          resolve();
+        };
+        t.imageElement.addEventListener('load', onLoad);
+        t.imageElement.addEventListener('error', onLoad);
+        // 超时保护
+        setTimeout(() => {
+          t.imageElement.removeEventListener('load', onLoad);
+          t.imageElement.removeEventListener('error', onLoad);
+          resolve();
+        }, 5000);
+      }));
+
+    if (promises.length > 0) {
+      await Promise.all(promises);
+      console.log(`[PDFExport] 📸 等待 ${promises.length} 张图片加载完毕`);
+    }
+  }
+
+  /**
+   * 🔧 手动合成图片 + 覆盖层文字到 canvas
+   * 避免 html2canvas 在 inline 父元素、overflow:hidden 容器等场景下的渲染问题
+   */
+  private async compositeImageWithOverlays(target: ExportTarget): Promise<HTMLCanvasElement> {
+    const dataUrl = this.imageDataUrlCache.get(target.imageSrc);
+    if (!dataUrl) throw new Error('无缓存 data URL');
+
+    // 1. 加载原图
+    const img = await this.loadImageFromDataUrl(dataUrl);
+    const imgNaturalW = img.naturalWidth;
+    const imgNaturalH = img.naturalHeight;
+
+    // 2. 创建画布（使用原图自然尺寸，确保最高质量）
+    const canvas = document.createElement('canvas');
+    canvas.width = imgNaturalW;
+    canvas.height = imgNaturalH;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('无法创建 canvas 上下文');
+
+    // 3. 绘制白色背景 + 原图
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0);
+
+    // 4. 获取覆盖层数据
+    const overlays = this.callbacks.getOverlaysForImage(target.imageElement);
+    if (overlays.length === 0) {
+      return canvas;
+    }
+
+    // 5. 获取图片当前显示尺寸（用于比例换算）
+    const imgRect = target.imageElement.getBoundingClientRect();
+    const scaleX = imgNaturalW / imgRect.width;
+    const scaleY = imgNaturalH / imgRect.height;
+
+    // 6. 逐个绘制覆盖层文字到 canvas
+    for (const overlay of overlays) {
+      const text = overlay.textContent?.trim();
+      if (!text) continue;
+
+      const overlayRect = overlay.getBoundingClientRect();
+      // 覆盖层在 canvas 上的坐标（相对于图片左上角）
+      const ox = (overlayRect.left - imgRect.left) * scaleX;
+      const oy = (overlayRect.top - imgRect.top) * scaleY;
+      const ow = overlayRect.width * scaleX;
+      const oh = overlayRect.height * scaleY;
+
+      // 跳过完全不可见的覆盖层
+      if (ow < 1 || oh < 1) continue;
+
+      const style = window.getComputedStyle(overlay);
+      const fontSize = parseFloat(style.fontSize) * scaleX;
+      const padding = parseFloat(style.padding) * scaleX || 0;
+      const fontFamily = style.fontFamily || 'sans-serif';
+      const color = style.color || '#000000';
+      const textAlign = style.textAlign || 'center';
+      const writingMode = style.writingMode || 'horizontal-tb';
+
+      // 解析背景色
+      let bgColor = style.backgroundColor;
+      let bgOpacity = 1;
+      if (bgColor === 'rgba(0, 0, 0, 0)' || bgColor === 'transparent') {
+        bgOpacity = 0;
+      } else if (bgColor.startsWith('rgba')) {
+        const match = bgColor.match(/rgba?\((\d+),\s*(\d+),\s*(\d+),?\s*([\d.]+)?\)/);
+        if (match) {
+          const r = parseInt(match[1]), g = parseInt(match[2]), b = parseInt(match[3]);
+          bgOpacity = match[4] ? parseFloat(match[4]) : 1;
+          bgColor = `rgb(${r},${g},${b})`;
+        }
+      }
+
+      ctx.save();
+
+      // 绘制背景
+      if (bgOpacity > 0) {
+        const borderRadius = parseFloat(style.borderRadius) * scaleX || 0;
+        ctx.fillStyle = bgColor;
+        ctx.globalAlpha = bgOpacity;
+        if (borderRadius > 0) {
+          this.roundRect(ctx, ox, oy, ow, oh, borderRadius);
+          ctx.fill();
+        } else {
+          ctx.fillRect(ox, oy, ow, oh);
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      // 设置文字样式
+      ctx.fillStyle = color;
+      ctx.textBaseline = 'middle';
+
+      if (writingMode === 'vertical-rl') {
+        // 竖排文字
+        ctx.textAlign = 'center';
+        const chars = [...text];
+        const charSize = Math.min(fontSize, oh / (chars.length + 1));
+        ctx.font = `${charSize}px ${fontFamily}`;
+        for (let ci = 0; ci < chars.length; ci++) {
+          const cy = oy + padding + (ci + 0.5) * (oh - padding * 2) / chars.length;
+          ctx.fillText(chars[ci], ox + ow / 2, cy);
+        }
+      } else {
+        // 横排文字 — 使用自适应字号确保不溢出
+        const maxWidth = ow - padding * 2;
+        const maxHeight = oh - padding * 2;
+        if (maxWidth <= 0 || maxHeight <= 0) {
+          ctx.restore();
+          continue;
+        }
+
+        let drawFontSize = fontSize;
+        let lines = this.wrapText(ctx, text, maxWidth, drawFontSize, fontFamily);
+        // 如果文字高度不够，缩小字号
+        while (lines.length * drawFontSize * 1.4 > maxHeight && drawFontSize > 4) {
+          drawFontSize -= 1;
+          lines = this.wrapText(ctx, text, maxWidth, drawFontSize, fontFamily);
+        }
+        // 如果文字宽度不够，也缩小字号
+        ctx.font = `${drawFontSize}px ${fontFamily}`;
+        let textWidth = 0;
+        for (const line of lines) {
+          const lw = ctx.measureText(line).width;
+          if (lw > textWidth) textWidth = lw;
+        }
+        while (textWidth > maxWidth && drawFontSize > 4) {
+          drawFontSize -= 1;
+          ctx.font = `${drawFontSize}px ${fontFamily}`;
+          lines = this.wrapText(ctx, text, maxWidth, drawFontSize, fontFamily);
+          textWidth = 0;
+          for (const line of lines) {
+            const lw = ctx.measureText(line).width;
+            if (lw > textWidth) textWidth = lw;
+          }
+        }
+
+        ctx.font = `${drawFontSize}px ${fontFamily}`;
+        const lineHeight = drawFontSize * 1.3;
+        const totalTextHeight = lines.length * lineHeight;
+        let startY = oy + (oh - totalTextHeight) / 2 + lineHeight / 2;
+        if (startY < oy + padding) startY = oy + padding + lineHeight / 2;
+
+        for (const line of lines) {
+          let x: number;
+          if (textAlign === 'center') {
+            x = ox + ow / 2;
+            ctx.textAlign = 'center';
+          } else if (textAlign === 'right') {
+            x = ox + ow - padding;
+            ctx.textAlign = 'right';
+          } else {
+            x = ox + padding;
+            ctx.textAlign = 'left';
+          }
+          ctx.fillText(line, x, startY);
+          startY += lineHeight;
+        }
+      }
+
+      ctx.restore();
+    }
+
+    return canvas;
+  }
+
+  /** 在 canvas 上绘制圆角矩形 */
+  private roundRect(
+    ctx: CanvasRenderingContext2D,
+    x: number, y: number, w: number, h: number, r: number
+  ): void {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.arcTo(x + w, y, x + w, y + r, r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+    ctx.lineTo(x + r, y + h);
+    ctx.arcTo(x, y + h, x, y + h - r, r);
+    ctx.lineTo(x, y + r);
+    ctx.arcTo(x, y, x + r, y, r);
+    ctx.closePath();
+  }
+
+  /** 手动文字换行（中英日混排） */
+  private wrapText(
+    ctx: CanvasRenderingContext2D,
+    text: string,
+    maxWidth: number,
+    fontSize: number,
+    fontFamily: string
+  ): string[] {
+    ctx.font = `${fontSize}px ${fontFamily}`;
+    const lines: string[] = [];
+    const chars = [...text];
+    let currentLine = '';
+
+    for (const char of chars) {
+      const testLine = currentLine + char;
+      const testWidth = ctx.measureText(testLine).width;
+      if (testWidth > maxWidth && currentLine.length > 0) {
+        lines.push(currentLine);
+        currentLine = char;
+      } else {
+        currentLine = testLine;
+      }
+    }
+    if (currentLine) {
+      lines.push(currentLine);
+    }
+
+    return lines.length > 0 ? lines : [text];
   }
 
   // ============================================
