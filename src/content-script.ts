@@ -791,6 +791,7 @@ async function initialize(): Promise<void> {
     pdfExporter.configure({
       getOverlaysForImage: (img: HTMLImageElement) => overlayManager.getOverlaysForImage(img),
       getTranslatedImages: () => overlayManager.getAllTranslatedImages(),
+      getContainerForImage: (img: HTMLImageElement) => overlayManager.getContainerForImage(img),
       onExitRequest: () => handlePdfModeExit(),
       onSaveEdits: (_imageSrc: string, _overlays: HTMLElement[]) => {
         pdfModeEditDirty = true;

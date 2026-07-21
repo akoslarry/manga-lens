@@ -28,6 +28,8 @@ export interface PDFExporterCallbacks {
   getOverlaysForImage: (imageEl: HTMLImageElement) => HTMLElement[];
   /** 获取已翻译图片列表 */
   getTranslatedImages: () => HTMLImageElement[];
+  /** 获取指定图片的覆盖层容器 */
+  getContainerForImage: (imageEl: HTMLImageElement) => HTMLElement | undefined;
   /** 退出PDF模式时调用（content-script 处理确认弹窗） */
   onExitRequest: () => void;
   /** 持久化用户修改 */
@@ -48,6 +50,7 @@ export class PDFExporter {
   private checkboxes: Map<string, HTMLElement> = new Map(); // imageSrc → 选择框元素
   private callbacks: PDFExporterCallbacks;
   private editingOverlay: HTMLElement | null = null; // 当前正在编辑的覆盖层
+  private modifiedContainers = new Set<HTMLElement>(); // PDF模式下 pointer-events 被改为 auto 的容器
 
   // 工具栏按钮引用
   private btnExportAll: HTMLElement | null = null;
@@ -505,6 +508,14 @@ export class PDFExporter {
   enableOverlayEditing(): void {
     const images = this.callbacks.getTranslatedImages();
     for (const img of images) {
+      // 使覆盖层容器拦截点击，防止穿透到图片下方的 &lt;a&gt; 链接导致跳转
+      const container = this.callbacks.getContainerForImage(img);
+      if (container && !this.modifiedContainers.has(container)) {
+        container.style.pointerEvents = 'auto';
+        container.addEventListener('click', this._onContainerClick, true);
+        this.modifiedContainers.add(container);
+      }
+
       const overlays = this.callbacks.getOverlaysForImage(img);
       for (const overlay of overlays) {
         this.makeOverlayEditable(overlay);
@@ -522,6 +533,14 @@ export class PDFExporter {
         this.makeOverlayReadOnly(overlay);
       }
     }
+
+    // 恢复容器 pointer-events 和移除点击拦截
+    for (const container of this.modifiedContainers) {
+      container.style.pointerEvents = 'none';
+      container.removeEventListener('click', this._onContainerClick, true);
+    }
+    this.modifiedContainers.clear();
+
     this.clearEditingState();
     console.log('[PDFExport] 🔒 覆盖层编辑模式已禁用');
   }
@@ -560,6 +579,12 @@ export class PDFExporter {
     // 移除resize handles
     overlay.querySelectorAll('.ml-resize-handle').forEach(h => h.remove());
   }
+
+  /** 拦截容器点击，阻止穿透到 &lt;a&gt; 标签导致页面跳转 */
+  private _onContainerClick = (e: Event) => {
+    e.stopPropagation();
+    e.preventDefault();
+  };
 
   private _onOverlayHover = (e: Event) => {
     const el = e.currentTarget as HTMLElement;
