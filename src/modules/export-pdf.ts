@@ -30,6 +30,8 @@ export interface PDFExporterCallbacks {
   getTranslatedImages: () => HTMLImageElement[];
   /** 获取指定图片的覆盖层容器 */
   getContainerForImage: (imageEl: HTMLImageElement) => HTMLElement | undefined;
+  /** 获取图片的缓存对话数据（用于恢复自定义字体大小） */
+  getCachedDialogsForImage: (imageSrc: string) => Promise<any[] | null>;
   /** 退出PDF模式时调用（content-script 处理确认弹窗） */
   onExitRequest: () => void;
   /** 持久化用户修改 */
@@ -51,6 +53,7 @@ export class PDFExporter {
   private callbacks: PDFExporterCallbacks;
   private editingOverlay: HTMLElement | null = null; // 当前正在编辑的覆盖层
   private modifiedContainers = new Set<HTMLElement>(); // PDF模式下 pointer-events 被改为 auto 的容器
+  private customFontSizes = new Map<string, number>();   // 每个覆盖层的自定义字号 (overlayId → px)
 
   // 工具栏按钮引用
   private btnExportAll: HTMLElement | null = null;
@@ -79,6 +82,16 @@ export class PDFExporter {
   /** 获取保存子目录 */
   getSavePath(): string {
     return this.savePath;
+  }
+
+  /** 获取当前所有覆盖层的自定义字体大小的快照（用于持久化） */
+  getCustomFontSizes(): Map<string, number> {
+    return new Map(this.customFontSizes);
+  }
+
+  /** 清空自定义字体大小缓存 */
+  resetCustomFontSizes(): void {
+    this.customFontSizes.clear();
   }
 
   /** 进入PDF编辑模式 */
@@ -124,6 +137,7 @@ export class PDFExporter {
 
     // 清理编辑态覆盖层
     this.clearEditingState();
+    this.customFontSizes.clear();
 
     this.isPdfMode = false;
     this.selectedImages.clear();
@@ -277,6 +291,14 @@ export class PDFExporter {
     // 序号角标
     const badge = document.createElement('div');
     badge.className = 'manga-lens-pdf-order-badge';
+    badge.style.cssText = `
+      position: absolute; top: -6px; right: -6px;
+      width: 18px; height: 18px;
+      background: #ff9800; color: #fff;
+      border-radius: 50%; font-size: 10px;
+      text-align: center; line-height: 18px;
+      font-weight: 600; pointer-events: none;
+    `;
     badge.textContent = String(this.selectionCounter);
     checkbox.appendChild(badge);
 
@@ -339,7 +361,7 @@ export class PDFExporter {
     checkbox.style.cssText = `
       position: fixed;
       top: ${rect.top + 8}px;
-      left: ${rect.right - 36}px;
+      left: ${rect.left + 8}px;
       z-index: 2147483646;
       width: 28px; height: 28px;
       border-radius: 8px;
@@ -378,7 +400,7 @@ export class PDFExporter {
         badge = document.createElement('div');
         badge.className = 'manga-lens-pdf-order-badge';
         badge.style.cssText = `
-          position: absolute; top: -6px; left: -6px;
+          position: absolute; top: -6px; right: -6px;
           width: 18px; height: 18px;
           background: #ff9800; color: #fff;
           border-radius: 50%; font-size: 10px;
@@ -436,7 +458,7 @@ export class PDFExporter {
             badge = document.createElement('div');
             badge.className = 'manga-lens-pdf-order-badge';
             badge.style.cssText = `
-              position: absolute; top: -6px; left: -6px;
+              position: absolute; top: -6px; right: -6px;
               width: 18px; height: 18px;
               background: #ff9800; color: #fff;
               border-radius: 50%; font-size: 10px;
@@ -524,6 +546,36 @@ export class PDFExporter {
     console.log('[PDFExport] ✏️ 覆盖层编辑模式已启用');
   }
 
+  /** 从缓存恢复每个覆盖层的自定义字体大小（异步调用） */
+  async loadPersistedFontSizes(): Promise<void> {
+    const images = this.callbacks.getTranslatedImages();
+    for (const img of images) {
+      const dialogs = await this.callbacks.getCachedDialogsForImage(img.src);
+      if (!dialogs) continue;
+
+      // 建立 dialogId → customFontSize 的映射
+      const dialogFontMap = new Map<number, number>();
+      for (const d of dialogs) {
+        if (d.customFontSize) {
+          dialogFontMap.set(d.id, d.customFontSize);
+        }
+      }
+      if (dialogFontMap.size === 0) continue;
+
+      // 应用到对应覆盖层
+      const overlays = this.callbacks.getOverlaysForImage(img);
+      for (const overlay of overlays) {
+        const dialogId = parseInt(overlay.dataset.dialogId || '', 10);
+        if (dialogId && dialogFontMap.has(dialogId)) {
+          const fontSize = dialogFontMap.get(dialogId)!;
+          overlay.style.fontSize = `${fontSize}px`;
+          this.customFontSizes.set(overlay.id, fontSize);
+        }
+      }
+    }
+    console.log('[PDFExport] 📐 已恢复自定义字体大小:', this.customFontSizes.size, '个覆盖层');
+  }
+
   /** 禁用覆盖层编辑 */
   disableOverlayEditing(): void {
     const images = this.callbacks.getTranslatedImages();
@@ -580,8 +632,13 @@ export class PDFExporter {
     overlay.querySelectorAll('.ml-resize-handle').forEach(h => h.remove());
   }
 
-  /** 拦截容器点击，阻止穿透到 &lt;a&gt; 标签导致页面跳转 */
+  /** 拦截容器背景点击，阻止穿透到 &lt;a&gt; 标签导致页面跳转 */
   private _onContainerClick = (e: Event) => {
+    const target = e.target as HTMLElement;
+    // 不拦截覆盖层及其子元素的点击（编辑工具栏、resize手柄等）
+    if (target.closest('.manga-lens-text-overlay') || target.closest('.ml-overlay-edit-toolbar') || target.closest('.ml-resize-handle')) {
+      return;
+    }
     e.stopPropagation();
     e.preventDefault();
   };
@@ -658,8 +715,15 @@ export class PDFExporter {
 
   private _onDragStart = (e: MouseEvent) => {
     if (!this.editingOverlay) return;
+
+    // 点击 resize handles 时不启动拖拽
+    const target = e.target as HTMLElement;
+    if (target.closest('.ml-resize-handle') || target.closest('.ml-overlay-edit-toolbar') || target.closest('.ml-font-size-input')) {
+      return;
+    }
+
     e.stopPropagation();
-    e.preventDefault();
+    // 不调 preventDefault()，保留 contentEditable 的聚焦行为
 
     const rect = this.editingOverlay.getBoundingClientRect();
     this.dragInfo = {
@@ -678,6 +742,11 @@ export class PDFExporter {
 
     const dx = e.clientX - this.dragInfo.startX;
     const dy = e.clientY - this.dragInfo.startY;
+
+    // 只有实际拖拽超过3px时才阻止默认行为（防止误拖拽时干扰文本选中）
+    if (Math.abs(dx) < 3 && Math.abs(dy) < 3) return;
+
+    e.preventDefault(); // 拖拽中阻止文本选中
 
     const parent = this.editingOverlay.parentElement;
     if (!parent) return;
@@ -788,41 +857,86 @@ export class PDFExporter {
   }
 
   // ============================================
-  // 编辑工具栏（删除按钮）
+  // 编辑工具栏（删除 + 完成 + 字体大小）
   // ============================================
 
   private addEditToolbar(overlay: HTMLElement): void {
     const toolbar = document.createElement('div');
     toolbar.className = 'ml-overlay-edit-toolbar';
     toolbar.style.cssText = `
-      position: absolute; bottom: -28px; left: 0; right: 0;
-      display: flex; gap: 4px; justify-content: center;
-      z-index: 20; pointer-events: auto;
+      position: absolute; bottom: -34px; left: 0; right: 0;
+      display: flex; gap: 4px; justify-content: center; align-items: center;
+      z-index: 20; pointer-events: auto; white-space: nowrap;
     `;
 
+    // 字体大小输入
+    const fontSizeGroup = document.createElement('div');
+    fontSizeGroup.style.cssText = `
+      display: flex; align-items: center; gap: 2px;
+      background: rgba(0,0,0,0.7); border-radius: 4px; padding: 2px 4px;
+    `;
+    const fontSizeLabel = document.createElement('span');
+    fontSizeLabel.textContent = '字号';
+    fontSizeLabel.style.cssText = 'color: #aaa; font-size: 10px;';
+    const fontSizeInput = document.createElement('input');
+    fontSizeInput.className = 'ml-font-size-input';
+    fontSizeInput.type = 'number';
+    fontSizeInput.min = '4';
+    fontSizeInput.max = '80';
+    fontSizeInput.step = '1';
+
+    // 初始值 = overlay 当前 fontSize
+    const currentSize = parseInt(overlay.style.fontSize, 10) || 16;
+    // 检查是否有已保存的自定义字号
+    const savedSize = this.customFontSizes.get(overlay.id);
+    fontSizeInput.value = String(savedSize || currentSize);
+    fontSizeInput.style.cssText = `
+      width: 36px; height: 20px; padding: 0 2px; font-size: 11px;
+      text-align: center; border: 1px solid rgba(255,255,255,0.3);
+      border-radius: 3px; background: rgba(255,255,255,0.15); color: #fff;
+      outline: none; pointer-events: auto;
+    `;
+    fontSizeGroup.appendChild(fontSizeLabel);
+    fontSizeGroup.appendChild(fontSizeInput);
+
+    // 字号变化 → 立刻更新 overlay 并记录
+    const updateFontSize = () => {
+      const newSize = parseInt(fontSizeInput.value, 10);
+      if (isNaN(newSize) || newSize < 4) return;
+      overlay.style.fontSize = `${newSize}px`;
+      this.customFontSizes.set(overlay.id, newSize);
+      this.callbacks.onSaveEdits('', []);
+    };
+    fontSizeInput.addEventListener('input', updateFontSize);
+    fontSizeInput.addEventListener('change', updateFontSize);
+    fontSizeInput.addEventListener('mousedown', (e) => e.stopPropagation());
+
+    // 删除按钮
     const btnDelete = document.createElement('button');
-    btnDelete.textContent = '× 删除';
+    btnDelete.textContent = '删除';
     btnDelete.style.cssText = `
       padding: 2px 8px; font-size: 11px;
       background: rgba(255,50,50,0.85); color: #fff;
       border: none; border-radius: 4px; cursor: pointer;
-      pointer-events: auto;
+      pointer-events: auto; white-space: nowrap;
     `;
     btnDelete.addEventListener('mousedown', (e) => {
       e.stopPropagation();
       e.preventDefault();
+      this.customFontSizes.delete(overlay.id);
       this.callbacks.onSaveEdits('', []);
       overlay.remove();
       this.clearEditingState();
     });
 
+    // 完成按钮
     const btnDone = document.createElement('button');
-    btnDone.textContent = '✓ 完成';
+    btnDone.textContent = '完成';
     btnDone.style.cssText = `
       padding: 2px 8px; font-size: 11px;
       background: rgba(102,126,234,0.85); color: #fff;
       border: none; border-radius: 4px; cursor: pointer;
-      pointer-events: auto;
+      pointer-events: auto; white-space: nowrap;
     `;
     btnDone.addEventListener('mousedown', (e) => {
       e.stopPropagation();
@@ -831,6 +945,7 @@ export class PDFExporter {
       this.clearEditingState();
     });
 
+    toolbar.appendChild(fontSizeGroup);
     toolbar.appendChild(btnDelete);
     toolbar.appendChild(btnDone);
     overlay.appendChild(toolbar);

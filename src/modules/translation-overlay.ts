@@ -783,6 +783,7 @@ export class TranslationOverlayManager {
     overlay.id = id;
     overlay.className = this.overlayClass;
     overlay.textContent = translatedText;
+    overlay.dataset.dialogId = String(dialog.id); // 关联 MergedDialog，用于持久化单覆盖层字体大小
 
     // 计算字体大小（基于原文平均字符宽度和翻译后字符数）
     const baseFontSize = this.calculateFontSizeForDialog(dialog, translatedText, safeBounds.width, cfg);

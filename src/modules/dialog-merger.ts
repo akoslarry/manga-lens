@@ -61,6 +61,8 @@ export interface MergedDialog {
   translationSuccess?: boolean;
   /** 是否竖排文字（通过 OCR 片段的宽高比判断） */
   isVertical?: boolean;
+  /** 用户手动设定的每个覆盖层字体大小（px），null/undefined 表示使用默认 */
+  customFontSize?: number;
 }
 
 /** 翻译后的对话（带完整翻译信息） */

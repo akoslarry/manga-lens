@@ -792,6 +792,7 @@ async function initialize(): Promise<void> {
       getOverlaysForImage: (img: HTMLImageElement) => overlayManager.getOverlaysForImage(img),
       getTranslatedImages: () => overlayManager.getAllTranslatedImages(),
       getContainerForImage: (img: HTMLImageElement) => overlayManager.getContainerForImage(img),
+      getCachedDialogsForImage: async (imageSrc: string) => await translationCache.get(imageSrc),
       onExitRequest: () => handlePdfModeExit(),
       onSaveEdits: (_imageSrc: string, _overlays: HTMLElement[]) => {
         pdfModeEditDirty = true;
@@ -887,6 +888,8 @@ async function handlePdfModeExit(): Promise<void> {
   } else {
     // 保留修改：覆盖本地缓存
     console.log('[MangaLens] 用户选择保留修改，持久化到本地缓存');
+    const customFontSizes = pdfExporter.getCustomFontSizes(); // overlayId → px
+
     const images = overlayManager.getAllTranslatedImages();
     for (const img of images) {
       // 从当前缓存数据读取（因为数据结构不变，只是位置/文字被用户改了）
@@ -909,6 +912,22 @@ async function handlePdfModeExit(): Promise<void> {
                 dialog.translatedText = snap.text;
                 break;
               }
+            }
+          }
+        }
+      }
+
+      // 持久化自定义字体大小（使用 dataset.dialogId 匹配）
+      const overlays = overlayManager.getOverlaysForImage(img);
+      for (const overlay of overlays) {
+        const overlayId = overlay.id;
+        if (customFontSizes.has(overlayId)) {
+          const fontSize = customFontSizes.get(overlayId)!;
+          const dialogId = parseInt(overlay.dataset.dialogId || '', 10);
+          if (dialogId) {
+            const dialog = cachedDialogs.find((d: any) => d.id === dialogId);
+            if (dialog) {
+              dialog.customFontSize = fontSize;
             }
           }
         }
@@ -1117,6 +1136,8 @@ chrome.runtime.onMessage.addListener(async (message, sender, sendResponse) => {
       pdfExporter.enterPdfMode(pdfModeSavePath);
       // 3. 启用覆盖层编辑
       pdfExporter.enableOverlayEditing();
+      // 4. 异步加载已保存的自定义字体大小
+      pdfExporter.loadPersistedFontSizes().catch(() => {});
       console.log('[MangaLens] 📄 已进入PDF导出模式');
       sendResponse({ success: true });
       break;
