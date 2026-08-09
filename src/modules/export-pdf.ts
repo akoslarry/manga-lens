@@ -161,8 +161,10 @@ export class PDFExporter {
     document.documentElement.style.scrollPaddingTop = '';
     document.body.style.paddingTop = '';
 
-    // 清理编辑态覆盖层
-    this.clearEditingState();
+    // 🔧 先禁用所有覆盖层的编辑模式（解除 dblclick/拖拽/hover 等事件），
+    //    再清理当前活跃编辑覆盖层。之前只调 clearEditingState 导致非活跃
+    //    覆盖层仍保留 dblclick → 进入编辑态的路径。
+    this.disableOverlayEditing();
     this.customFontSizes.clear();
     this.customOpacities.clear();
     this.deletedDialogIds.clear();
@@ -551,6 +553,36 @@ export class PDFExporter {
     console.log('[PDFExport] 📐 已恢复自定义字体大小:', this.customFontSizes.size, '个覆盖层');
   }
 
+  /** 从缓存恢复每个覆盖层的自定义背景透明度（异步调用） */
+  async loadPersistedOpacities(): Promise<void> {
+    const images = this.callbacks.getTranslatedImages();
+    for (const img of images) {
+      const dialogs = await this.callbacks.getCachedDialogsForImage(img.src);
+      if (!dialogs) continue;
+
+      // 建立 dialogId → customOpacity 的映射
+      const dialogOpacityMap = new Map<number, number>();
+      for (const d of dialogs) {
+        if (d.customOpacity !== undefined && d.customOpacity !== null) {
+          dialogOpacityMap.set(d.id, d.customOpacity);
+        }
+      }
+      if (dialogOpacityMap.size === 0) continue;
+
+      // 应用到对应覆盖层
+      const overlays = this.callbacks.getOverlaysForImage(img);
+      for (const overlay of overlays) {
+        const dialogId = parseInt(overlay.dataset.dialogId || '', 10);
+        if (!isNaN(dialogId) && dialogOpacityMap.has(dialogId)) {
+          const opacity = dialogOpacityMap.get(dialogId)!;
+          overlay.style.backgroundColor = `rgba(255, 255, 255, ${opacity.toFixed(2)})`;
+          this.customOpacities.set(overlay.id, opacity);
+        }
+      }
+    }
+    console.log('[PDFExport] 🎨 已恢复自定义透明度:', this.customOpacities.size, '个覆盖层');
+  }
+
   /** 禁用覆盖层编辑 */
   disableOverlayEditing(): void {
     const images = this.callbacks.getTranslatedImages();
@@ -902,6 +934,7 @@ export class PDFExporter {
       display: flex; flex-direction: column; gap: 4px; align-items: stretch;
       z-index: 2147483646; pointer-events: auto; white-space: nowrap;
       width: 130px;
+      writing-mode: horizontal-tb;
     `;
 
     // 字体大小输入
@@ -941,7 +974,8 @@ export class PDFExporter {
     fontSizeGroup.appendChild(fontSizeLabel);
     fontSizeGroup.appendChild(fontSizeInput);
 
-    // 透明度滑块组
+    // 透明度滑块组 — 使用纯 div 自定义滑块，彻底绕过 Chrome 在
+    //    writing-mode:vertical-rl 页面下强制 <input type="range"> 竖向渲染的问题。
     const opacityGroup = document.createElement('div');
     opacityGroup.style.cssText = `
       display: flex; align-items: center; justify-content: space-between; gap: 2px;
@@ -950,89 +984,124 @@ export class PDFExporter {
     const opacityLabel = document.createElement('span');
     opacityLabel.textContent = '透明';
     opacityLabel.style.cssText = 'color: #aaa; font-size: 11px; user-select: none;';
-    const opacityInput = document.createElement('input');
-    opacityInput.type = 'range';
-    opacityInput.className = 'ml-opacity-slider';
-    opacityInput.min = '0';
-    opacityInput.max = '100';
-    opacityInput.step = '1';
-    // 初始值：优先从 customOpacities 取，否则用 globalOpacity
+
+    const sliderTrackW = 70;
+    const sliderTrackH = 4;
+    const thumbSize   = 14;
+
+    // 初始值
     const savedOpacity = this.customOpacities.get(overlay.id);
     const currentBgOpacity = savedOpacity !== undefined ? savedOpacity : this.globalOpacity;
-    opacityInput.value = String(Math.round(currentBgOpacity * 100));
-    // 🔧 关键：-webkit-appearance: none 必须写在 inline style 中。
-    //     类选择器方式（<style> 注入 .ml-opacity-slider）在 content-script
-    //     环境下可能被浏览器 UA stylesheet 覆盖，导致原生垂直 slider 渲染。
-    //     height: 10px 给 thumb (12px×12px) 留出垂直居中的余量。
-    //     thumb 伪元素样式无法 inline，仍通过 <style> 注入到 <head>。
-    opacityInput.style.cssText = `
-      -webkit-appearance: none !important; appearance: none !important;
-      width: 70px; height: 10px;
-      background: rgba(255,255,255,0.18);
-      border-radius: 3px; outline: none;
-      cursor: pointer; pointer-events: auto;
-      writing-mode: horizontal-tb !important;
-    `;
-    opacityInput.title = `背景透明度: ${opacityInput.value}%`;
+    let sliderPercent = Math.round(currentBgOpacity * 100);
 
-    // 🔧 注入 thumb 样式到 <head>（伪元素无法通过 inline style 设置）
-    const SLIDER_STYLE_ID = 'ml-opacity-slider-style';
-    if (!document.getElementById(SLIDER_STYLE_ID)) {
-      const sliderStyle = document.createElement('style');
-      sliderStyle.id = SLIDER_STYLE_ID;
-      sliderStyle.textContent = `
-        .ml-opacity-slider::-webkit-slider-thumb {
-          -webkit-appearance: none !important; appearance: none !important;
-          width: 12px; height: 12px;
-          border-radius: 50%;
-          background: #667eea;
-          border: 2px solid #fff;
-          cursor: pointer;
-          margin-top: -2px;
-        }
-        .ml-opacity-slider::-moz-range-thumb {
-          width: 12px; height: 12px;
-          border-radius: 50%;
-          background: #667eea;
-          border: 2px solid #fff;
-          cursor: pointer;
-          border-style: solid;
-        }
-        .ml-opacity-slider::-webkit-slider-runnable-track {
-          height: 6px;
-          background: rgba(255,255,255,0.18);
-          border-radius: 3px;
-        }
-        .ml-opacity-slider::-moz-range-track {
-          height: 6px;
-          background: rgba(255,255,255,0.18);
-          border-radius: 3px;
-        }
-      `;
-      document.head.appendChild(sliderStyle);
-    }
+    // 轨道容器
+    const sliderWrap = document.createElement('div');
+    sliderWrap.style.cssText = `
+      width: ${sliderTrackW}px; height: ${thumbSize}px;
+      position: relative; display: flex; align-items: center;
+      cursor: pointer; user-select: none;
+      flex-shrink: 0;
+    `;
+    // 轨道底色
+    const sliderTrack = document.createElement('div');
+    sliderTrack.style.cssText = `
+      width: 100%; height: ${sliderTrackH}px;
+      background: rgba(255,255,255,0.18);
+      border-radius: ${sliderTrackH / 2}px;
+    `;
+    sliderWrap.appendChild(sliderTrack);
+    // 已填充部分
+    const sliderFill = document.createElement('div');
+    sliderFill.style.cssText = `
+      position: absolute; left: 0; top: ${(thumbSize - sliderTrackH) / 2}px;
+      height: ${sliderTrackH}px; width: ${sliderPercent}%;
+      background: #667eea;
+      border-radius: ${sliderTrackH / 2}px;
+      pointer-events: none;
+    `;
+    sliderWrap.appendChild(sliderFill);
+    // 拖动圆钮
+    const sliderThumb = document.createElement('div');
+    sliderThumb.style.cssText = `
+      position: absolute;
+      left: ${sliderPercent}%; top: 50%;
+      width: ${thumbSize}px; height: ${thumbSize}px;
+      margin-left: -${thumbSize / 2}px; margin-top: -${thumbSize / 2}px;
+      border-radius: 50%;
+      background: #667eea;
+      border: 2px solid #fff;
+      box-sizing: border-box;
+      pointer-events: auto;
+    `;
+    sliderWrap.appendChild(sliderThumb);
+
+    // 同步 UI（填充 + 圆钮位置）
+    const syncSliderUI = (pct: number) => {
+      sliderPercent = Math.max(0, Math.min(100, pct));
+      sliderFill.style.width = `${sliderPercent}%`;
+      sliderThumb.style.left = `${sliderPercent}%`;
+    };
+
+    // 从鼠标/触摸坐标计算百分比
+    const pctFromClientX = (clientX: number): number => {
+      const rect = sliderWrap.getBoundingClientRect();
+      const x = clientX - rect.left;
+      return (x / rect.width) * 100;
+    };
+
+    // 拖动
+    let dragging = false;
+    const onStart = (e: MouseEvent | TouchEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dragging = true;
+      if ('touches' in e) {
+        syncSliderUI(pctFromClientX(e.touches[0].clientX));
+        updateOpacity(sliderPercent);
+      }
+    };
+    const onMove = (e: MouseEvent | TouchEvent) => {
+      if (!dragging) return;
+      e.preventDefault();
+      const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
+      syncSliderUI(pctFromClientX(clientX));
+      updateOpacity(sliderPercent);
+    };
+    const onEnd = () => { dragging = false; };
+
+    sliderThumb.addEventListener('mousedown', onStart);
+    sliderThumb.addEventListener('touchstart', onStart, { passive: false });
+    // 点击轨道跳转
+    sliderWrap.addEventListener('mousedown', (e) => {
+      if (e.target === sliderThumb) return; // 由 thumb 的 onStart 处理
+      e.preventDefault();
+      e.stopPropagation();
+      syncSliderUI(pctFromClientX(e.clientX));
+      updateOpacity(sliderPercent);
+      // 然后进入拖拽模式
+      dragging = true;
+    });
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('touchmove', onMove, { passive: false });
+    document.addEventListener('mouseup', onEnd);
+    document.addEventListener('touchend', onEnd);
+
     const opacityValueSpan = document.createElement('span');
-    opacityValueSpan.textContent = `${opacityInput.value}%`;
+    opacityValueSpan.textContent = `${sliderPercent}%`;
     opacityValueSpan.style.cssText = 'color: #fff; font-size: 11px; min-width: 30px; text-align: center;';
     opacityGroup.appendChild(opacityLabel);
-    opacityGroup.appendChild(opacityInput);
+    opacityGroup.appendChild(sliderWrap);
     opacityGroup.appendChild(opacityValueSpan);
 
     // 透明度变化 → 立刻更新 overlay + 记录
-    // 🔧 始终固定背景为白色 rgba(255,255,255,x)，仅修改 alpha 通道。
-    //     之前用 regex 从 DOM 回读再替换 alpha 的方案存在浏览器格式归一化风险
-    //     （如 rgb(255,255,255) 缺 alpha / rgba(255 255 255 / 0.88) 现代语法），
-    //     匹配失败时背景会残留错误的颜色。
-    const updateOpacity = () => {
-      const newOpacity = parseInt(opacityInput.value, 10) / 100;
+    const updateOpacity = (pct: number) => {
+      const newOpacity = pct / 100;
       if (isNaN(newOpacity)) return;
       overlay.style.backgroundColor = `rgba(255, 255, 255, ${newOpacity.toFixed(2)})`;
       this.customOpacities.set(overlay.id, newOpacity);
-      opacityValueSpan.textContent = `${Math.round(newOpacity * 100)}%`;
+      opacityValueSpan.textContent = `${Math.round(pct)}%`;
       this.callbacks.onSaveEdits('', []);
     };
-    opacityInput.addEventListener('input', updateOpacity);
-    opacityInput.addEventListener('mousedown', (e) => e.stopPropagation());
 
     // 字号变化 → 立刻更新 overlay 并记录
     const updateFontSize = () => {

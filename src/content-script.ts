@@ -193,13 +193,18 @@ function enqueueImage(image: DetectedImage): Promise<{ boxes: any[]; imageSrc: s
       const cachedDialogs = await translationCache.get(imageSrc);
       if (cachedDialogs) {
         console.log(`[MangaLens] 📦 从缓存加载翻译（跳过OCR）: ${imageSrc.substring(0, 50)}... (${cachedDialogs.length} 个对话)`);
-        overlayManager.renderMergedDialogs(image.element, cachedDialogs, {
-          horizontalText: false,
-          fontSize: overlayManager.getBaseFontSize(),
-          background: '#FFFFFF',
-          backgroundOpacity: 0.88,
-          padding: 4
-        });
+        if (cachedDialogs.length > 0) {
+          overlayManager.renderMergedDialogs(image.element, cachedDialogs, {
+            horizontalText: false,
+            fontSize: overlayManager.getBaseFontSize(),
+            background: '#FFFFFF',
+            backgroundOpacity: 0.88,
+            padding: 4
+          });
+        } else {
+          // 纯场景画面（无文本）：只创建容器，不渲染覆盖层
+          overlayManager.createContainer(image.element);
+        }
         state.processedImages.add(imageSrc);
         updatePopupStatus();
         // PDF模式同步
@@ -257,7 +262,13 @@ async function translateAndRender(
 
   try {
     if (ocrResult.boxes.length === 0) {
-      console.log('[MangaLens] ⚠️ No text detected');
+      console.log('[MangaLens] ⚠️ No text detected (scene-only page)');
+      // 纯场景画面仍需注册容器，否则 PDF 导出复选框会缺页
+      overlayManager.createContainer(image.element);
+      state.processedImages.add(imageSrc);
+      await translationCache.set(imageSrc, []);
+      if (pdfExporter.pdfMode) pdfExporter.refreshCheckboxes();
+      updatePopupStatus();
       return;
     }
 
@@ -455,8 +466,14 @@ async function processImage(image: DetectedImage): Promise<void> {
     const ocrResult = await mangaOCR.recognize(image.element);
 
     if (ocrResult.boxes.length === 0) {
-      console.log('[MangaLens] ⚠️ No text detected (either no text in image, or OCR model not loaded)');
+      console.log('[MangaLens] ⚠️ No text detected (scene-only page, or OCR model not loaded)');
       hideLoading();
+      // 纯场景画面仍需注册容器，否则 PDF 导出复选框会缺页
+      overlayManager.createContainer(image.element);
+      state.processedImages.add(imageSrc);
+      await translationCache.set(imageSrc, []);
+      if (pdfExporter.pdfMode) pdfExporter.refreshCheckboxes();
+      updatePopupStatus();
       return;
     }
 
@@ -868,6 +885,65 @@ window.addEventListener('manga-lens-rerender', async (event: Event) => {
 // PDF导出模式 - 退出确认
 // ============================================
 
+/** 自定义确认弹窗，替代原生 confirm() 以支持自定义按钮文字 */
+function showCustomConfirm(message: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = `
+      position: fixed; z-index: 2147483647; inset: 0;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.6);
+      font-family: system-ui, -apple-system, sans-serif;
+    `;
+    const box = document.createElement('div');
+    box.style.cssText = `
+      background: #1e1e2e; border-radius: 12px; padding: 24px 28px 18px;
+      max-width: 380px; width: 90vw;
+      color: #e0e0e0; font-size: 14px; line-height: 1.6;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    `;
+
+    const msgEl = document.createElement('p');
+    msgEl.textContent = message;
+    msgEl.style.cssText = 'margin: 0 0 20px 0;';
+    box.appendChild(msgEl);
+
+    const btnRow = document.createElement('div');
+    btnRow.style.cssText = 'display: flex; gap: 10px; justify-content: flex-end;';
+
+    const saveBtn = document.createElement('button');
+    saveBtn.textContent = '保存';
+    saveBtn.style.cssText = `
+      padding: 8px 20px; border-radius: 6px; border: none; cursor: pointer;
+      background: #667eea; color: #fff; font-size: 13px;
+      font-family: inherit;
+    `;
+    const restoreBtn = document.createElement('button');
+    restoreBtn.textContent = '恢复';
+    restoreBtn.style.cssText = `
+      padding: 8px 20px; border-radius: 6px; border: 1px solid #555; cursor: pointer;
+      background: transparent; color: #ccc; font-size: 13px;
+      font-family: inherit;
+    `;
+
+    const cleanup = (result: boolean) => {
+      overlay.remove();
+      resolve(result);
+    };
+    saveBtn.addEventListener('click', () => cleanup(false));
+    restoreBtn.addEventListener('click', () => cleanup(true));
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) cleanup(false); // 点遮罩层 = 默认保存
+    });
+
+    btnRow.appendChild(restoreBtn);
+    btnRow.appendChild(saveBtn);
+    box.appendChild(btnRow);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+  });
+}
+
 async function handlePdfModeExit(): Promise<void> {
   // 🔧 退出前始终静默持久化当前编辑状态（防止 resize/文字编辑等未触发脏标记的修改丢失）
   if (pdfModeEditDirty) {
@@ -879,13 +955,13 @@ async function handlePdfModeExit(): Promise<void> {
   //    （如 resize、纯文字编辑等未调用 onSaveEdits 的场景）
   //    通过检查覆盖层快照与缓存的差异来决定是否弹确认窗
   const confirmMessage = '即将退出PDF导出模式。\n\n' +
-    '点击"保留修改"：保存您的手动调整，覆盖原始翻译结果\n' +
-    '点击"恢复原状"：丢弃手动修改，恢复到翻译时的原始状态';
+    '点击"保存"：保存您的手动调整，覆盖原始翻译结果\n' +
+    '点击"恢复"：丢弃手动修改，恢复到翻译时的原始状态';
 
-  const shouldRestore = confirm(confirmMessage);
+  const shouldRestore = await showCustomConfirm(confirmMessage);
 
   if (shouldRestore) {
-    // 用户选择"确定"=恢复原状：从缓存重新渲染所有图片
+    // 用户选择"恢复"=恢复原状：从缓存重新渲染所有图片
     console.log('[MangaLens] 用户选择恢复原状，从缓存重新渲染');
     const images = overlayManager.getAllTranslatedImages();
     for (const img of images) {
@@ -895,7 +971,7 @@ async function handlePdfModeExit(): Promise<void> {
       }
     }
   } else {
-    // 用户选择"取消"=保留修改：覆盖本地缓存
+    // 用户选择"保存"=保留修改：覆盖本地缓存
     console.log('[MangaLens] 用户选择保留修改，持久化到本地缓存');
     const customFontSizes = pdfExporter.getCustomFontSizes(); // overlayId → px
 
@@ -1254,8 +1330,9 @@ chrome.runtime.onMessage.addListener(async (message, sender, sendResponse) => {
       pdfExporter.enterPdfMode(pdfModeSavePath);
       // 3. 启用覆盖层编辑
       pdfExporter.enableOverlayEditing();
-      // 4. 异步加载已保存的自定义字体大小
+      // 4. 异步加载已保存的自定义字体大小和透明度
       pdfExporter.loadPersistedFontSizes().catch(() => {});
+      pdfExporter.loadPersistedOpacities().catch(() => {});
       console.log('[MangaLens] 📄 已进入PDF导出模式');
       sendResponse({ success: true });
       break;
