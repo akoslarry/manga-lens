@@ -28,7 +28,10 @@ export interface TranslationOverlay {
 export interface RenderConfig {
   /** 译文是否横排（原文通常是竖排） */
   horizontalText: boolean;
-  /** 字体大小 */
+  /**
+   * @deprecated 算法 v1 起字号由 font-fitter 自适应计算，不再通过渲染配置传入。
+   * 该字段仅为向后兼容保留，传入无效。
+   */
   fontSize?: number;
   /** 文字颜色 */
   color?: string;
@@ -45,8 +48,9 @@ export interface RenderConfig {
 /**
  * 历史默认基础字号（px）
  *
- * 算法 v1 起，用户配置的「基础字号」作为整体调整基准，
- * 该常量是 1.0 系数对应的参考值（即用户设为 22px 时不影响自适应结果）。
+ * 仅供「旧设置迁移」使用：早期版本存储用户字号为绝对值（mangaLensFontSize，
+ * 默认 22px），算法 v1 起改为倍率（mangaLensFontScale），迁移时以该值作为
+ * 1.0 倍的换算基准（22px → 100%）。
  */
 const DEFAULT_BASE_FONT_SIZE = 22;
 
@@ -76,11 +80,21 @@ export class TranslationOverlayManager {
   private minFontScale = 0.4;
   private maxFontScale = 3.0;
 
-  // 用户可配置的基础字号（单位 px，持久化到 storage）
-  // 🔧 算法 v1 起：该值不再直接作为字号，而是作为「自适应字号的整体调整基准」
-  private baseFontSize = 22;
+  /**
+   * 全局字号缩放倍率（用户可在 popup 配置，持久化到 storage）
+   *
+   * 字号计算共三层，职责独立：
+   *   1. 自适应基准字号：由 font-fitter 按每个气泡尺寸算出，决定相对大小（视觉分级）
+   *   2. 全局缩放倍率（本字段）：对所有气泡等比缩放，1.0 = 100% 不改变自适应结果
+   *   3. 图片级缩放：角标 ± 按钮，对单张图片内所有气泡缩放（仅当次会话）
+   */
+  private globalFontScale = 1.0;
 
-  // 可读下限（px）：自适应计算不得低于此值，宁可溢出也不牺牲可读性
+  /** 全局缩放的可配置范围（0.5 ~ 1.6，即 50% ~ 160%） */
+  private readonly minGlobalFontScale = 0.5;
+  private readonly maxGlobalFontScale = 1.6;
+
+  /** 可读下限（px）：自适应计算不得低于此值，宁可溢出也不牺牲可读性 */
   private minFontSize = 10;
 
   // 上次计算得到的基准字号（overlayId → px），用于字体缩放与全局字号变更时重算
@@ -381,69 +395,112 @@ export class TranslationOverlayManager {
   }
 
   /**
-   * 设置基础字体大小（由 popup 设置界面触发）
+   * 设置全局字号缩放倍率（由 popup 设置界面触发）
    *
-   * 🔧 算法 v1 起语义变化：该值不再直接作为字号使用，而是作为
-   *    「自适应字号的整体调整基准」。用户调整它会整体增减各气泡的字号，
-   *    但每个气泡仍保留自身的相对大小（视觉分级不丢失）。
+   * @param scale 倍率，1.0 = 100%（不改变自适应结果），范围 0.5 ~ 1.6
    */
-  setBaseFontSize(size: number): void {
-    this.baseFontSize = Math.max(10, Math.min(36, size));
-    console.log(`[Overlay] 基础字体大小已更新: ${this.baseFontSize}px`);
+  setGlobalFontScale(scale: number): void {
+    this.globalFontScale = Math.max(
+      this.minGlobalFontScale,
+      Math.min(this.maxGlobalFontScale, scale)
+    );
+    console.log(
+      `[Overlay] 全局字号缩放已更新: ${Math.round(this.globalFontScale * 100)}%`
+    );
     // 立即应用到所有已渲染的覆盖层
-    this.applyBaseFontSizeToAllOverlays();
+    this.applyGlobalFontScaleToAllOverlays();
+  }
+
+  /** 获取当前全局字号缩放倍率（1.0 = 100%） */
+  getGlobalFontScale(): number {
+    return this.globalFontScale;
   }
 
   /**
-   * 将「各覆盖层自身的自适应基准字号 × 基础字号调整系数 × 图片缩放」应用到所有覆盖层
+   * 将「各覆盖层自身的自适应基准字号 × 全局缩放倍率 × 图片级缩放」应用到所有覆盖层
    *
-   * 与算法 v1 之前的区别：之前是「全局固定字号 × 缩放」，
-   * 现在保留每个气泡自适应算出的基准字号，只叠加整体调整系数，
-   * 从而在大框标题、小框说明等场景下依然保持视觉分级。
+   * 三层职责独立：自适应基准决定气泡间的相对大小（视觉分级），
+   * 全局倍率做整体等比缩放，图片级缩放只影响单张图片。
    */
-  private applyBaseFontSizeToAllOverlays(): void {
-    // 整体调整系数 = 用户设定值 / 22（22 为历史默认值，保证默认状态下不改变自适应结果）
-    const globalFactor = this.baseFontSize / DEFAULT_BASE_FONT_SIZE;
-
+  private applyGlobalFontScaleToAllOverlays(): void {
     this.containers.forEach((container, imageElement) => {
-      const scale = this.fontScaleMap.get(imageElement) || this.defaultFontScale;
+      const imageScale = this.fontScaleMap.get(imageElement) || this.defaultFontScale;
 
       this.overlays.forEach((overlay) => {
         if (container.contains(overlay.element)) {
-          // 优先使用该覆盖层缓存的基准字号；无缓存时回退到全局基准
-          const base = this.baseFontSizeMap.get(overlay.id) ?? DEFAULT_BASE_FONT_SIZE;
-          const newFontSize = Math.max(
-            this.minFontSize,
-            base * globalFactor * scale
-          );
-          overlay.element.style.fontSize = `${newFontSize}px`;
+          const newFontSize = this.resolveFontSize(overlay);
+          if (newFontSize > 0) {
+            overlay.element.style.fontSize = `${newFontSize}px`;
+          }
         }
       });
     });
     console.log(
-      `[Overlay] 已更新所有覆盖层字体: 全局调整系数=${globalFactor.toFixed(2)}`
+      `[Overlay] 已更新所有覆盖层字体: 全局缩放=${Math.round(this.globalFontScale * 100)}%`
     );
   }
 
   /**
-   * 获取当前基础字体大小
+   * 计算某覆盖层当前应使用的字号
+   *
+   * = 自适应基准字号 × 全局缩放倍率 × 该图片的缩放系数，并受可读下限约束。
+   * 若该覆盖层无自适应基准记录（例如来自旧缓存的异常数据），返回 0 表示不处理。
    */
-  getBaseFontSize(): number {
-    return this.baseFontSize;
+  private resolveFontSize(overlay: TranslationOverlay): number {
+    const base = this.baseFontSizeMap.get(overlay.id);
+    if (base === undefined) return 0;
+
+    // 图片级缩放系数：从覆盖层所属图片反查
+    let imageScale = this.defaultFontScale;
+    for (const [imgEl, container] of this.containers) {
+      if (container.contains(overlay.element)) {
+        imageScale = this.fontScaleMap.get(imgEl) || this.defaultFontScale;
+        break;
+      }
+    }
+
+    return Math.max(this.minFontSize, base * this.globalFontScale * imageScale);
   }
 
   /**
-   * 从 chrome.storage.local 加载用户设置的基础字号
+   * 从 chrome.storage.local 加载用户设置的全局字号缩放
+   *
+   * 兼容迁移：早期版本存储的是「基础字号 px」（mangaLensFontSize，22 为基准），
+   * 若读取到该旧字段则按 px / 22 换算为倍率，避免用户设置丢失。
    */
   async loadSavedFontSize(): Promise<void> {
     try {
-      const result = await chrome.storage.local.get(['mangaLensFontSize']);
+      const result = await chrome.storage.local.get([
+        'mangaLensFontScale',
+        'mangaLensFontSize'
+      ]);
+
+      if (result.mangaLensFontScale !== undefined) {
+        this.globalFontScale = Math.max(
+          this.minGlobalFontScale,
+          Math.min(this.maxGlobalFontScale, result.mangaLensFontScale)
+        );
+        console.log(
+          `[Overlay] 加载已保存字号缩放: ${Math.round(this.globalFontScale * 100)}%`
+        );
+        return;
+      }
+
+      // 旧字段迁移（px → 倍率）
       if (result.mangaLensFontSize !== undefined) {
-        this.baseFontSize = Math.max(10, Math.min(36, result.mangaLensFontSize));
-        console.log(`[Overlay] 加载已保存字体大小: ${this.baseFontSize}px`);
+        const legacyPx = Number(result.mangaLensFontSize);
+        if (Number.isFinite(legacyPx) && legacyPx > 0) {
+          this.globalFontScale = Math.max(
+            this.minGlobalFontScale,
+            Math.min(this.maxGlobalFontScale, legacyPx / DEFAULT_BASE_FONT_SIZE)
+          );
+          console.log(
+            `[Overlay] 迁移旧字号设置 ${legacyPx}px → ${Math.round(this.globalFontScale * 100)}%`
+          );
+        }
       }
     } catch (e) {
-      // 使用默认值 22px
+      // 使用默认值 100%
     }
   }
 
@@ -460,22 +517,19 @@ export class TranslationOverlayManager {
    */
   private applyFontScaleToOverlays(imageElement: HTMLImageElement): void {
     const scale = this.fontScaleMap.get(imageElement) || this.defaultFontScale;
-    const globalFactor = this.baseFontSize / DEFAULT_BASE_FONT_SIZE;
 
-    this.overlays.forEach((overlay, id) => {
+    this.overlays.forEach((overlay) => {
       // 只更新属于该图片的覆盖层
       if (this.isOverlayBelongsToImage(overlay, imageElement)) {
-        // 保留该覆盖层自适应算出的基准字号，仅叠加缩放系数
-        const base = this.baseFontSizeMap.get(id) ?? DEFAULT_BASE_FONT_SIZE;
-        const newFontSize = Math.max(
-          this.minFontSize,
-          base * globalFactor * scale
-        );
-        overlay.element.style.fontSize = `${newFontSize}px`;
+        // 保留该覆盖层自适应算出的基准字号与全局缩放，仅叠加图片级缩放
+        const newFontSize = this.resolveFontSize(overlay);
+        if (newFontSize > 0) {
+          overlay.element.style.fontSize = `${newFontSize}px`;
+        }
       }
     });
     console.log(
-      `[Overlay] 字体缩放: ${Math.round(scale * 100)}% (基准字号自适应保留)`
+      `[Overlay] 图片级缩放: ${Math.round(scale * 100)}% (自适应基准与全局缩放均保留)`
     );
   }
 
@@ -914,9 +968,12 @@ export class TranslationOverlayManager {
       baseFontSize = fit.fontSize;
       fitOverflow = fit.overflow;
       fitOverflowRatio = fit.overflowRatio;
-      // 用户对整张图片的缩放系数，作用于自适应基准字号
+      // 叠加全局缩放倍率与图片级缩放系数（受可读下限约束）
       const fontScale = this.getFontScale(imageElement);
-      fontSize = baseFontSize * fontScale;
+      fontSize = Math.max(
+        this.minFontSize,
+        baseFontSize * this.globalFontScale * fontScale
+      );
     }
     // 缓存基准字号，供字体缩放/全局字号变更时重算
     this.baseFontSizeMap.set(id, baseFontSize);
@@ -966,8 +1023,16 @@ export class TranslationOverlayManager {
     container.appendChild(overlay);
 
     // 🔧 迭代收敛：元素入 DOM 后，以浏览器真实排版为准精修字号
-    //    仅对自动计算的覆盖层生效；用户自定义字号的覆盖层不做干预
-    if (!dialog.customFontSize) {
+    //
+    //    触发条件：仅当「自适应基准」未被用户缩放干预时（全局 100% 且图片级 100%）。
+    //    原因：用户调大缩放的目的就是"字大一点，哪怕略微溢出"，此时若仍做迭代收敛，
+    //         算法会把字号压回"刚好装下"，反而抹掉用户意图。因此用户一旦调整过
+    //         缩放，就直接采用公式解 × 缩放，不做二次修正。
+    const imageFontScale = this.getFontScale(imageElement) || 1;
+    const scaleUntouched =
+      Math.abs(this.globalFontScale - 1) < 0.001 && Math.abs(imageFontScale - 1) < 0.001;
+
+    if (!dialog.customFontSize && scaleUntouched) {
       const padding = cfg.padding * 2;
       const refined = refineFontSizeByMeasurement(
         translatedText,
@@ -981,14 +1046,27 @@ export class TranslationOverlayManager {
 
       if (Math.abs(refined.fontSize - fontSize) > 0.5) {
         fontSize = refined.fontSize;
-        // 回填基准字号（去除用户缩放系数），供后续缩放/全局字号变更重算
-        const fontScale = this.getFontScale(imageElement) || 1;
-        baseFontSize = fontSize / fontScale;
+        // 此时缩放均为 1.0，收敛结果即自适应基准字号
+        baseFontSize = fontSize;
         this.baseFontSizeMap.set(id, baseFontSize);
         overlay.style.fontSize = `${fontSize}px`;
       }
       fitOverflow = refined.overflow;
       fitOverflowRatio = refined.overflowRatio;
+    } else if (!dialog.customFontSize) {
+      // 用户已调整缩放：不做迭代修正，仅按公式解判定溢出状态（用于提示）
+      const padding = cfg.padding * 2;
+      const probe = refineFontSizeByMeasurement(
+        translatedText,
+        overlay,
+        Math.max(1, pixelWidth - padding),
+        Math.max(1, pixelHeight - padding),
+        fontSize,
+        this.minFontSize,
+        DEFAULT_FONT_FIT_CONFIG.maxFontSize
+      );
+      fitOverflow = probe.overflow;
+      fitOverflowRatio = probe.overflowRatio;
     }
 
     // 标记溢出：即使压到可读下限仍装不下，提示用户手动调整（不自动改框）
@@ -1345,7 +1423,6 @@ export class TranslationOverlayManager {
     this.removeOverlaysForImage(imageElement);
     this.renderMergedDialogs(imageElement, dialogs, {
       horizontalText: false,
-      fontSize: this.baseFontSize,
       background: '#FFFFFF',
       backgroundOpacity: 0.88,
       padding: 4

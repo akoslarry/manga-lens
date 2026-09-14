@@ -53,6 +53,10 @@
           <div class="status-label">本地缓存条目</div>
         </div>
       </div>
+      <div class="btn-row" style="margin-top: 8px;">
+        <button class="btn btn-secondary" id="btnExportCache">📤 导出缓存 JSON</button>
+        <button class="btn btn-tertiary" id="btnClearCache">🗑️ 清空缓存</button>
+      </div>
     </div>
 
     <!-- 配置卡片 -->
@@ -133,14 +137,17 @@
 
     <!-- 字体设置卡片 -->
     <div class="card">
-      <div class="card-title">🔤 字体设置</div>
+      <div class="card-title">🔤 字号缩放</div>
       <div class="form-group">
-        <label class="form-label">默认字体大小 (px)</label>
+        <label class="form-label">全局缩放比例 (%)</label>
         <div class="btn-row">
-          <input type="number" class="form-input" id="fontSize" value="22" min="10" max="36" step="1" style="width: 80px;">
-          <button class="btn btn-primary btn-sm" id="btnSaveFontSize" style="flex: 0 0 auto; width: auto; padding: 8px 16px;">💾 保存</button>
+          <input type="number" class="form-input" id="fontScale" value="100" min="50" max="160" step="5" style="width: 80px;">
+          <button class="btn btn-primary btn-sm" id="btnSaveFontScale" style="flex: 0 0 auto; width: auto; padding: 8px 16px;">💾 保存</button>
         </div>
-        <p class="form-hint">范围：10-36px，新图片刷新后生效</p>
+        <p class="form-hint">
+          范围：50-160%，100% 为基准。实际字号会根据每个气泡的尺寸自动适配，
+          此处为对所有气泡的整体缩放系数，不会破坏气泡间的相对大小关系。
+        </p>
       </div>
     </div>
 

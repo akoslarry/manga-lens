@@ -29,9 +29,9 @@ const localCacheCount = document.getElementById('localCacheCount');
 const btnExportCache = document.getElementById('btnExportCache');
 const btnClearCache = document.getElementById('btnClearCache');
 
-// 字体设置
-const fontSizeInput = document.getElementById('fontSize');
-const btnSaveFontSize = document.getElementById('btnSaveFontSize');
+// 字号缩放设置
+const fontScaleInput = document.getElementById('fontScale');
+const btnSaveFontScale = document.getElementById('btnSaveFontScale');
 
 // 单次翻译上限
 const batchLimitInput = document.getElementById('batchLimit');
@@ -84,7 +84,8 @@ async function loadConfig() {
   const result = await chrome.storage.local.get([
     'apiKey', 'apiSecret', 'deepseekApiKey', 'isEnabled',
     'tencentSecretId', 'tencentSecretKey', 'directRegion', 'directAction',
-    'mangaLensFontSize', 'mangaLensBatchLimit', 'mangaLensCacheEnabled'
+    'mangaLensFontScale', 'mangaLensFontSize',
+    'mangaLensBatchLimit', 'mangaLensCacheEnabled'
   ]);
   
   if (result.deepseekApiKey) {
@@ -109,9 +110,11 @@ async function loadConfig() {
     directActionSelect.value = result.directAction;
   }
   
-  // 字体大小设置
-  if (result.mangaLensFontSize) {
-    fontSizeInput.value = result.mangaLensFontSize;
+  // 字号缩放设置（兼容旧字段 mangaLensFontSize：22px 视为 100%）
+  if (result.mangaLensFontScale !== undefined) {
+    fontScaleInput.value = Math.round(result.mangaLensFontScale * 100);
+  } else if (result.mangaLensFontSize) {
+    fontScaleInput.value = Math.round((result.mangaLensFontSize / 22) * 100);
   }
 
   // 单次翻译上限
@@ -300,19 +303,24 @@ btnSelect.addEventListener('click', async () => {
   }
 });
 
-// 保存字体大小设置
-btnSaveFontSize.addEventListener('click', async () => {
-  let fontSize = parseInt(fontSizeInput.value, 10);
-  
-  if (isNaN(fontSize) || fontSize < 10) {
-    fontSize = 10;
-  } else if (fontSize > 36) {
-    fontSize = 36;
-  }
-  fontSizeInput.value = fontSize;
+// 保存字号缩放设置
+btnSaveFontScale.addEventListener('click', async () => {
+  let percent = parseInt(fontScaleInput.value, 10);
 
-  // 持久化到 storage
-  await chrome.storage.local.set({ mangaLensFontSize: fontSize });
+  if (isNaN(percent) || percent < 50) {
+    percent = 50;
+  } else if (percent > 160) {
+    percent = 160;
+  }
+  fontScaleInput.value = percent;
+
+  const scale = percent / 100;
+
+  // 持久化到 storage（同时写入新字段与旧字段，兼容不同版本读取）
+  await chrome.storage.local.set({
+    mangaLensFontScale: scale,
+    mangaLensFontSize: Math.round(22 * scale)
+  });
 
   // 通知 content script
   try {
@@ -320,14 +328,14 @@ btnSaveFontSize.addEventListener('click', async () => {
     if (tab.id) {
       await chrome.tabs.sendMessage(tab.id, {
         type: 'UPDATE_FONT_SIZE',
-        fontSize
+        scale
       });
     }
   } catch (error) {
     console.error('通知 content script 失败:', error);
   }
 
-  showAlert(`✅ 字体大小已保存: ${fontSize}px（新图片刷新后生效）`, 'success');
+  showAlert(`✅ 字号缩放已保存: ${percent}%（立即生效）`, 'success');
 });
 
 // 保存单次翻译上限

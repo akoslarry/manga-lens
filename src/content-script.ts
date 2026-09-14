@@ -196,7 +196,7 @@ function enqueueImage(image: DetectedImage): Promise<{ boxes: any[]; imageSrc: s
         if (cachedDialogs.length > 0) {
           overlayManager.renderMergedDialogs(image.element, cachedDialogs, {
             horizontalText: false,
-            fontSize: overlayManager.getBaseFontSize(),
+
             background: '#FFFFFF',
             backgroundOpacity: 0.88,
             padding: 4
@@ -245,7 +245,7 @@ async function translateAndRender(
       console.log(`[MangaLens] 📦 从缓存加载翻译: ${imageSrc.substring(0, 50)}... (${cachedDialogs.length} 个对话)`);
       overlayManager.renderMergedDialogs(image.element, cachedDialogs, {
         horizontalText: false,
-        fontSize: overlayManager.getBaseFontSize(),
+
         background: '#FFFFFF',
         backgroundOpacity: 0.88,
         padding: 4
@@ -361,7 +361,7 @@ async function translateAndRender(
 
     overlayManager.renderMergedDialogs(image.element, mergedDialogs, {
       horizontalText: false,
-      fontSize: overlayManager.getBaseFontSize(),
+
       background: '#FFFFFF',
       backgroundOpacity: 0.88,
       padding: 4
@@ -446,7 +446,7 @@ async function processImage(image: DetectedImage): Promise<void> {
       console.log(`[MangaLens] 📦 从缓存加载翻译: ${imageSrc.substring(0, 50)}... (${cachedDialogs.length} 个对话)`);
       overlayManager.renderMergedDialogs(image.element, cachedDialogs, {
         horizontalText: false,
-        fontSize: overlayManager.getBaseFontSize(),
+
         background: '#FFFFFF',
         backgroundOpacity: 0.88,
         padding: 4
@@ -565,7 +565,7 @@ async function processImage(image: DetectedImage): Promise<void> {
     
     overlayManager.renderMergedDialogs(image.element, mergedDialogs, {
       horizontalText: false,  // Vertical text (consistent with Japanese original)
-      fontSize: overlayManager.getBaseFontSize(),
+
       background: '#FFFFFF',
       backgroundOpacity: 0.88,
       padding: 4
@@ -855,7 +855,7 @@ async function retranslateImage(imageElement: HTMLImageElement): Promise<void> {
     overlayManager.removeOverlaysForImage(imageElement);
     overlayManager.renderMergedDialogs(imageElement, cachedDialogs, {
       horizontalText: false,
-      fontSize: overlayManager.getBaseFontSize(),
+
       background: '#FFFFFF',
       backgroundOpacity: 0.88,
       padding: 4
@@ -1416,9 +1416,17 @@ chrome.runtime.onMessage.addListener(async (message, sender, sendResponse) => {
       break;
 
     case 'UPDATE_FONT_SIZE':
-      overlayManager.setBaseFontSize(message.fontSize);
-      console.log(`[MangaLens] 字体大小已更新: ${message.fontSize}px`);
-      sendResponse({ success: true });
+      // 🔧 语义已改为「全局字号缩放倍率」：1.0 = 100%
+      //    兼容旧消息格式：若传入的是 px（>3 视为 px），按 22px = 100% 换算
+      {
+        const raw = Number(message.scale ?? message.fontSize ?? 1);
+        const scale = raw > 3 ? raw / 22 : raw;
+        overlayManager.setGlobalFontScale(scale);
+        console.log(
+          `[MangaLens] 全局字号缩放已更新: ${Math.round(scale * 100)}%`
+        );
+        sendResponse({ success: true });
+      }
       break;
 
     case 'RERENDER_IMAGE':

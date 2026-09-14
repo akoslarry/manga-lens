@@ -1541,8 +1541,10 @@ export class PDFExporter {
         `⚠️ 导出完成，但有 ${failedPages.length} 张图片未能写入 PDF：\n\n` +
         lines.join('\n') +
         more +
-        '\n\n提示：本地文件(file://)或无法访问的图片请改用 http(s) 页面；' +
-        '也可在页面中先截图再导出。'
+        '\n\n提示：\n' +
+        '· 若图片是本地文件、页面为 file:// 形式，请在 chrome://extensions ' +
+        '中为本扩展开启「允许访问文件网址」后重试；\n' +
+        '· 若为跨源图片被安全策略拦截，可在图片所在页面直接导出，或先截图再导出。'
       );
     }
   }
@@ -1559,6 +1561,14 @@ export class PDFExporter {
   ): Promise<void> {
     const uniqueUrls = [...new Set(targets.map(t => t.imageSrc))];
 
+    // imageSrc → 页面上已加载的图片元素，用于「复用已加载元素」截图
+    const elementBySrc = new Map<string, HTMLImageElement>();
+    for (const t of targets) {
+      if (!elementBySrc.has(t.imageSrc)) {
+        elementBySrc.set(t.imageSrc, t.imageElement);
+      }
+    }
+
     // 并行拉取所有图片
     const results = await Promise.allSettled(
       uniqueUrls.map(async (url) => {
@@ -1569,16 +1579,37 @@ export class PDFExporter {
         }
 
         // 2. blob: URL：只能在创建它的文档上下文中访问，background 必然失败，
-        //    因此在本文档内 fetch 后转为 dataURL（拖入浏览器的图片常为此类）
+        //    因此在本文档内 fetch 后转为 dataURL
         if (url.startsWith('blob:')) {
           const dataUrl = await this.blobUrlToDataUrl(url);
           this.imageDataUrlCache.set(url, dataUrl);
           return;
         }
 
-        // 3. file: URL：扩展 service worker 无法 fetch 本地文件，直接报明确错误
+        // 3. file: URL（例如直接把本地图片拖进浏览器后导航到 file:// 页面）
+        //
+        //    ⚠️ Chrome 明令禁止对 file: 协议发起 fetch/XHR：
+        //       "Cross origin requests are only supported for protocol schemes:
+        //        chrome, chrome-extension, ..., http, https"
+        //    因此 file:// 场景唯一可行的手段是「复用页面中已加载的 <img> 元素」：
+        //    该元素的像素已由浏览器加载，绘制到 canvas 后可直接导出，
+        //    这与 OCR 提取图片所用的机制完全一致。
         if (url.startsWith('file:')) {
-          throw new Error('本地文件图片（file://）无法读取，无法导出到 PDF');
+          const el = elementBySrc.get(url);
+          if (el && el.complete && el.naturalWidth > 0) {
+            const dataUrl = await this.captureElementToDataUrl(el);
+            this.imageDataUrlCache.set(url, dataUrl);
+            return;
+          }
+          if (window.location.protocol !== 'file:') {
+            throw new Error(
+              '页面为网页而图片为本地文件（file://），受浏览器安全策略限制无法读取'
+            );
+          }
+          // 元素未加载完成时，尝试常规路径（通常仍会失败，交由报错提示）
+          const dataUrl = await this.fetchUrlToDataUrl(url);
+          this.imageDataUrlCache.set(url, dataUrl);
+          return;
         }
 
         // 4. 同源图片：本可直接使用，但为规避 canvas 污染风险统一转为 dataURL
@@ -1626,10 +1657,15 @@ export class PDFExporter {
 
   /** 判断 URL 是否与当前页面同源 */
   private isSameOrigin(url: string): boolean {
-    // blob:/file: 即使 origin 字面相同也不能直接当作 dataURL 使用：
-    // - blob: 仅在创建它的文档内有效
-    // - file: 在 Chrome 中通常被视为跨源，画入 canvas 会导致污染
-    if (url.startsWith('blob:') || url.startsWith('file:')) return false;
+    // blob: 虽然在创建它的文档内可用，但需特殊处理（转 dataURL），不走"同源直用"分支
+    if (url.startsWith('blob:')) return false;
+
+    // file: 与 file: 页面同源（Chrome 将 file:// 视为单一源），可正常读取与绘制；
+    // 但 file: 图片出现在 http(s) 页面时属跨源，不可用
+    if (url.startsWith('file:')) {
+      return window.location.protocol === 'file:';
+    }
+
     try {
       const u = new URL(url);
       return u.origin === window.location.origin;
@@ -1650,18 +1686,143 @@ export class PDFExporter {
 
   /** 在当前文档上下文中拉取 blob: URL 并转为 dataURL */
   private async blobUrlToDataUrl(blobUrl: string): Promise<string> {
-    const resp = await fetch(blobUrl);
-    if (!resp.ok) throw new Error(`blob 读取失败 (HTTP ${resp.status})`);
-    const blob = await resp.blob();
-    return await this.blobToDataUrl(blob);
+    try {
+      const resp = await fetch(blobUrl);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const blob = await resp.blob();
+      return await this.blobToDataUrl(blob);
+    } catch (fetchErr) {
+      // 兜底：blob 由本文档创建，img 必能加载，canvas 也不会污染
+      console.warn('[PDFExport] blob fetch 失败，回退 canvas 方式', fetchErr);
+      return await this.imageUrlToDataUrlViaCanvas(blobUrl);
+    }
   }
 
   /** 拉取同源 URL 并转为 dataURL（规避 canvas 污染） */
   private async fetchUrlToDataUrl(url: string): Promise<string> {
-    const resp = await fetch(url, { credentials: 'same-origin' });
-    if (!resp.ok) throw new Error(`图片读取失败 (HTTP ${resp.status})`);
-    const blob = await resp.blob();
-    return await this.blobToDataUrl(blob);
+    // 路径 1：fetch（网页环境最标准）
+    try {
+      const resp = await fetch(url, { credentials: 'same-origin' });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const blob = await resp.blob();
+      return await this.blobToDataUrl(blob);
+    } catch (fetchErr) {
+      console.warn(
+        `[PDFExport] fetch 失败，尝试 XHR: ${url.substring(0, 60)}`,
+        fetchErr
+      );
+    }
+
+    // 路径 2：XMLHttpRequest + responseType='blob'
+    //    在 file:// 页面中 XHR 读取同源本地文件通常被允许，
+    //    而 fetch 对 file:// 长期受限，因此这条路径成功率高得多。
+    try {
+      const blob = await this.xhrToBlob(url);
+      return await this.blobToDataUrl(blob);
+    } catch (xhrErr) {
+      console.warn(
+        `[PDFExport] XHR 失败，回退 canvas 方式读取: ${url.substring(0, 60)}`,
+        xhrErr
+      );
+    }
+
+    // 路径 3：<img> + <canvas>（前两条都不可用时的最后手段）
+    return await this.imageUrlToDataUrlViaCanvas(url);
+  }
+
+  /**
+   * 复用页面上「已加载的」<img> 元素，将其绘制到 canvas 并导出为 dataURL
+   *
+   * 这是 file:// 场景唯一可行的读取方式：
+   * - Chrome 禁止对 file: 协议发起 fetch/XHR（协议白名单不含 file）
+   * - 但页面中的 <img> 像素已由浏览器加载完成，直接绘制到 canvas 即可导出
+   *
+   * ⚠️ 关键：绝不设置 crossOrigin —— 一旦设置会以 CORS 模式重新请求，
+   *    反而使画布被标记污染。此处与 OCR 引擎的图片提取机制保持一致。
+   */
+  private async captureElementToDataUrl(img: HTMLImageElement): Promise<string> {
+    const canvas = document.createElement('canvas');
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('无法创建 canvas 上下文');
+
+    // 直接用已加载元素绘制，不新建 Image、不设置 crossOrigin
+    ctx.drawImage(img, 0, 0);
+
+    try {
+      const dataUrl = canvas.toDataURL('image/png');
+      if (!dataUrl || dataUrl === 'data:,') {
+        throw new Error('空白数据');
+      }
+      return dataUrl;
+    } catch (e) {
+      console.warn('[PDFExport] 复用已加载元素截图失败:', e);
+      throw new Error('画布像素被浏览器安全策略拦截');
+    }
+  }
+
+  /** 通过 XHR 以 blob 形式读取 URL */
+  private xhrToBlob(url: string): Promise<Blob> {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('GET', url, true);
+      xhr.responseType = 'blob';
+      xhr.onload = () => {
+        if (xhr.status === 0 || (xhr.status >= 200 && xhr.status < 300)) {
+          // file:// 场景下 status 常为 0，但 response 有效
+          if (xhr.response instanceof Blob) {
+            resolve(xhr.response);
+            return;
+          }
+        }
+        reject(new Error(`XHR 读取失败 (status=${xhr.status})`));
+      };
+      xhr.onerror = () => reject(new Error('XHR 网络错误'));
+      try {
+        xhr.send();
+      } catch (e) {
+        reject(e);
+      }
+    });
+  }
+
+  /**
+   * 通过 <img> + <canvas> 将图片 URL 转为 dataURL
+   *
+   * 适用于同源资源（含 file:// 页面下的本地图片）。
+   * 若资源跨源导致画布污染，toDataURL 会抛错，此处转为明确错误信息。
+   */
+  private async imageUrlToDataUrlViaCanvas(url: string): Promise<string> {
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error('图片加载失败'));
+      // ⚠️ 切勿设置 crossOrigin（哪怕赋 null）：
+      //    一旦设置该属性，元素会以 CORS 模式发起请求，
+      //    反而使图片被标记为跨源，导致画布污染。
+      //    保持默认（不设置）才能以同源方式加载。
+      el.src = url;
+    });
+
+    const canvas = document.createElement('canvas');
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('无法创建 canvas 上下文');
+    ctx.drawImage(img, 0, 0);
+
+    try {
+      return canvas.toDataURL('image/png');
+    } catch (e) {
+      console.warn(
+        `[PDFExport] canvas.toDataURL 被拒（页面协议=${window.location.protocol}）:`,
+        e
+      );
+      throw new Error(
+        '画布像素被浏览器安全策略拦截（常见于 file:// 直接打开的图片页）'
+      );
+    }
   }
 
   /** 从 data URL 加载 Image 对象 */
