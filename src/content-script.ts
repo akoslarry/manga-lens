@@ -5,7 +5,7 @@
  * 
  * 新功能：
  * - 对话合并（Y轴聚类 + X轴排序）
- * - 批量翻译（DeepSeek V4 Pro API 编号映射）
+ * - 批量翻译（DeepSeek V4.1 Flash API 编号映射）
  * - 翻译覆盖层（横排译文 → 竖排原文位置）
  */
 
@@ -241,14 +241,20 @@ async function translateAndRender(
   // 检查本地缓存
   const cachedDialogs = await translationCache.get(imageSrc);
   if (cachedDialogs) {
-    console.log(`[MangaLens] 📦 从缓存加载翻译: ${imageSrc.substring(0, 50)}... (${cachedDialogs.length} 个对话)`);
-    overlayManager.renderMergedDialogs(image.element, cachedDialogs, {
-      horizontalText: false,
-      fontSize: overlayManager.getBaseFontSize(),
-      background: '#FFFFFF',
-      backgroundOpacity: 0.88,
-      padding: 4
-    });
+    if (cachedDialogs.length > 0) {
+      console.log(`[MangaLens] 📦 从缓存加载翻译: ${imageSrc.substring(0, 50)}... (${cachedDialogs.length} 个对话)`);
+      overlayManager.renderMergedDialogs(image.element, cachedDialogs, {
+        horizontalText: false,
+        fontSize: overlayManager.getBaseFontSize(),
+        background: '#FFFFFF',
+        backgroundOpacity: 0.88,
+        padding: 4
+      });
+    } else {
+      // 纯场景页（无文字）：只创建容器，不渲染覆盖层
+      console.log(`[MangaLens] 📦 缓存命中纯场景页（无文字）: ${imageSrc.substring(0, 50)}...`);
+      overlayManager.createContainer(image.element);
+    }
     state.processedImages.add(imageSrc);
     updatePopupStatus();
     return;
@@ -313,7 +319,7 @@ async function translateAndRender(
 
     console.log(`[MangaLens] ✓ Dialog merge complete, merged into ${mergedDialogs.length} bubbles`);
 
-    // 3. Batch translation (using DeepSeek V4 Pro API)
+    // 3. Batch translation (using DeepSeek V4.1 Flash API)
     if (!state.deepseekApiKey) {
       console.error('[MangaLens] DeepSeek API Key not configured! Please configure in settings.');
       return;
@@ -436,14 +442,20 @@ async function processImage(image: DetectedImage): Promise<void> {
   // 检查本地缓存
   const cachedDialogs = await translationCache.get(imageSrc);
   if (cachedDialogs) {
-    console.log(`[MangaLens] 📦 从缓存加载翻译: ${imageSrc.substring(0, 50)}... (${cachedDialogs.length} 个对话)`);
-    overlayManager.renderMergedDialogs(image.element, cachedDialogs, {
-      horizontalText: false,
-      fontSize: overlayManager.getBaseFontSize(),
-      background: '#FFFFFF',
-      backgroundOpacity: 0.88,
-      padding: 4
-    });
+    if (cachedDialogs.length > 0) {
+      console.log(`[MangaLens] 📦 从缓存加载翻译: ${imageSrc.substring(0, 50)}... (${cachedDialogs.length} 个对话)`);
+      overlayManager.renderMergedDialogs(image.element, cachedDialogs, {
+        horizontalText: false,
+        fontSize: overlayManager.getBaseFontSize(),
+        background: '#FFFFFF',
+        backgroundOpacity: 0.88,
+        padding: 4
+      });
+    } else {
+      // 纯场景页（无文字）：只创建容器，不渲染覆盖层
+      console.log(`[MangaLens] 📦 缓存命中纯场景页（无文字）: ${imageSrc.substring(0, 50)}...`);
+      overlayManager.createContainer(image.element);
+    }
     state.processedImages.add(imageSrc);
     updatePopupStatus();
     // PDF模式同步
@@ -505,7 +517,7 @@ async function processImage(image: DetectedImage): Promise<void> {
 
     console.log(`[MangaLens] ✓ Dialog merge complete, merged into ${mergedDialogs.length} bubbles`);
 
-    // 3. Batch translation (using DeepSeek V4 Pro API)
+    // 3. Batch translation (using DeepSeek V4.1 Flash API)
     if (!state.deepseekApiKey) {
       console.error('[MangaLens] DeepSeek API Key not configured! Please configure in settings.');
       hideLoading();
@@ -767,6 +779,102 @@ async function selectImageManually(): Promise<void> {
   }
 }
 
+/**
+ * 重新翻译单张图片（跳过 OCR，直接重发 LLM 翻译请求）
+ * 用于角标"重新翻译"按钮：当图片翻译失败时，用户点击该按钮触发。
+ * 从本地缓存读取已合并的对话原文（MergedDialog[]），直接重新调用 DeepSeek 翻译。
+ */
+async function retranslateImage(imageElement: HTMLImageElement): Promise<void> {
+  const imageSrc = imageElement.src;
+  console.log(`[MangaLens] 🔄 重新翻译图片（跳过OCR）: ${imageSrc.substring(0, 80)}...`);
+
+  try {
+    // 1. 检查 DeepSeek API Key
+    if (!state.deepseekApiKey) {
+      console.error('[MangaLens] DeepSeek API Key not configured! Please configure in settings.');
+      showLoading('DeepSeek API Key 未配置');
+      return;
+    }
+
+    // 2. 从缓存读取已合并的对话（含原文 text，跳过 OCR）
+    const cachedDialogs = await translationCache.get(imageSrc);
+    if (cachedDialogs === null) {
+      console.warn('[MangaLens] ⚠️ 缓存中无该图片的记录，无法跳过OCR重新翻译，回退到完整流程');
+      // 回退：清除 processed 状态并走完整 OCR+翻译流程
+      state.processedImages.delete(imageSrc);
+      overlayManager.removeOverlaysForImage(imageElement);
+      await translationCache.delete(imageSrc);
+      const rect = imageElement.getBoundingClientRect();
+      const detected: DetectedImage = {
+        element: imageElement,
+        src: imageSrc,
+        position: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+        aspectRatio: imageElement.naturalWidth / imageElement.naturalHeight,
+        isManga: true
+      };
+      enqueueImage(detected);
+      return;
+    }
+
+    if (cachedDialogs.length === 0) {
+      // 纯场景页（无文字）：无需翻译，给出明确提示
+      console.log('[MangaLens] ℹ️ 该图片为纯场景页（无文字），无需重新翻译');
+      showLoading('该页无文字，无需翻译');
+      setTimeout(() => hideLoading(), 1500);
+      return;
+    }
+
+    showLoading('重新翻译中...');
+
+    // 3. 跳过 OCR，直接构造翻译请求数据
+    const batchTranslator = new BatchTranslator({ apiKey: state.deepseekApiKey });
+    const translationItems = cachedDialogs.map((dialog, idx) => ({
+      id: idx,
+      text: dialog.text
+    }));
+
+    const translationResult = await batchTranslator.translateInBatches(
+      translationItems,
+      (completed, total) => {
+        showLoading(`重新翻译进度: ${completed}/${total}`);
+      }
+    );
+
+    // 4. 映射翻译结果回对话
+    for (const item of translationResult.items) {
+      const dialog = cachedDialogs[item.id];
+      if (dialog) {
+        dialog.translatedText = item.translatedText || item.originalText;
+        dialog.translationSuccess = item.success;
+      }
+    }
+
+    console.log(`[MangaLens] ✓ 重新翻译完成: ${translationResult.successCount} success, ${translationResult.failureCount} failed`);
+
+    // 5. 移除旧覆盖层并重新渲染
+    overlayManager.removeOverlaysForImage(imageElement);
+    overlayManager.renderMergedDialogs(imageElement, cachedDialogs, {
+      horizontalText: false,
+      fontSize: overlayManager.getBaseFontSize(),
+      background: '#FFFFFF',
+      backgroundOpacity: 0.88,
+      padding: 4
+    });
+
+    // 6. 更新缓存
+    await translationCache.set(imageSrc, cachedDialogs);
+
+    // 7. PDF 模式同步
+    if (pdfExporter.pdfMode) pdfExporter.refreshCheckboxes();
+
+    hideLoading();
+    updatePopupStatus();
+  } catch (error) {
+    console.error('[MangaLens] ❌ 重新翻译失败:', error);
+    hideLoading();
+  }
+}
+
 // Initialization
 async function initialize(): Promise<void> {
   console.log('========================================');
@@ -819,6 +927,11 @@ async function initialize(): Promise<void> {
         await handlePdfModeAutoSave();
       }
     });
+
+    // 4.6 注入"重新翻译"按钮回调
+    overlayManager.onRetranslate = (imageElement: HTMLImageElement) => {
+      retranslateImage(imageElement);
+    };
 
     // 5. Process images on current page (delayed execution to ensure page fully loaded)
     console.log('[MangaLens] Step 3/3: Scanning page for images...');
@@ -1146,9 +1259,8 @@ chrome.runtime.onMessage.addListener(async (message, sender, sendResponse) => {
     case 'TOGGLE_ENABLED':
       state.isEnabled = message.enabled;
       if (!state.isEnabled) {
-        overlayManager.removeAllOverlays();
-        state.processedImages.clear();
-        console.log('[MangaLens] Translation disabled');
+        // 仅停止启动新的识别/翻译链路，不隐藏已渲染的翻译结果，不清空已处理标记与缓存
+        console.log('[MangaLens] Translation disabled (existing results kept)');
       } else {
         processAllImages();
       }

@@ -25,6 +25,17 @@ interface CachedEntry {
 class TranslationCache {
   private cacheEnabled = true;
 
+  // 写操作互斥锁：串行化「读-改-写」，避免并发 set/delete 互相覆盖丢失条目
+  private writeQueue: Promise<void> = Promise.resolve();
+
+  /** 串行执行写操作（读-改-写原子化） */
+  private async withWriteLock<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.writeQueue.then(fn);
+    // 无论成功失败都释放锁（用 catch 吞掉错误避免锁链断裂）
+    this.writeQueue = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
   // ==================== 开关控制 ====================
 
   /** 是否启用缓存读取 */
@@ -69,16 +80,34 @@ class TranslationCache {
 
   /** 保存全部缓存数据 */
   private async saveAll(cache: Record<string, CachedEntry>): Promise<void> {
+    // 诊断：打印当前缓存整体积大小（估算，序列化后字节数）
+    try {
+      const sizeBytes = JSON.stringify(cache).length;
+      const sizeKB = (sizeBytes / 1024).toFixed(1);
+      const sizeMB = (sizeBytes / 1024 / 1024).toFixed(2);
+      console.log(`[Cache] 📊 缓存体积: ${sizeBytes} 字节 (${sizeKB} KB / ${sizeMB} MB)，条目 ${Object.keys(cache).length} 条`);
+    } catch (sizeErr) {
+      console.warn('[Cache] 计算缓存体积失败:', sizeErr);
+    }
+
     try {
       await chrome.storage.local.set({ [CACHE_STORAGE_KEY]: cache });
     } catch (e) {
-      console.warn('[Cache] 保存缓存失败（可能超出配额）:', e);
+      const msg = e instanceof Error ? e.message : String(e);
+      const isQuota = /quota|exceed|maximum|MAX_WRITE/i.test(msg);
+      console.error(
+        `[Cache] ❌ 保存缓存失败${isQuota ? '（确认超出 storage.local 配额 10MB！）' : ''}:`,
+        e
+      );
     }
   }
 
   /**
    * 读取指定图片的缓存
-   * @returns 缓存对话数据，未命中返回 null
+   * @returns 缓存对话数据：
+   *   - null：无缓存条目（从未翻译过该图片）
+   *   - []（空数组）：纯场景页，已确认无文字（OCR 识别 0 个文本框）
+   *   - 非空数组：有对话数据（含翻译结果）
    */
   async get(imageUrl: string): Promise<MergedDialog[] | null> {
     if (!this.cacheEnabled) {
@@ -87,9 +116,22 @@ class TranslationCache {
     try {
       const cache = await this.loadAll();
       const entry = cache[imageUrl];
-      if (entry && entry.dialogs && entry.dialogs.length > 0) {
-        console.log(`[Cache] ✅ 命中: ${imageUrl.substring(0, 50)}... (${entry.dialogs.length} 个对话)`);
+      if (entry) {
+        if (entry.dialogs && entry.dialogs.length > 0) {
+          console.log(`[Cache] ✅ 命中: ${imageUrl.substring(0, 50)}... (${entry.dialogs.length} 个对话)`);
+        } else {
+          console.log(`[Cache] ✅ 命中（纯场景页，无文字）: ${imageUrl.substring(0, 50)}...`);
+        }
         return entry.dialogs;
+      }
+      // 未命中：打印查询 key 与缓存中存在的 key，辅助定位 key 不匹配问题
+      console.warn(`[Cache] ❌ 未命中: ${imageUrl}`);
+      const keys = Object.keys(cache);
+      console.warn(`[Cache] 缓存中现有 ${keys.length} 个 key:`);
+      // 打印前 20 个 key 便于对比
+      keys.slice(0, 20).forEach((k, i) => console.warn(`[Cache]   [${i}] ${k}`));
+      if (keys.length > 20) {
+        console.warn(`[Cache]   ... 其余 ${keys.length - 20} 个 key 省略`);
       }
     } catch (e) {
       console.warn('[Cache] 读取条目失败:', e);
@@ -101,59 +143,65 @@ class TranslationCache {
    * 保存指定图片的翻译结果
    */
   async set(imageUrl: string, dialogs: MergedDialog[]): Promise<void> {
-    try {
-      const cache = await this.loadAll();
-      cache[imageUrl] = {
-        imageUrl,
-        dialogs,
-        timestamp: Date.now()
-      };
+    await this.withWriteLock(async () => {
+      try {
+        const cache = await this.loadAll();
+        cache[imageUrl] = {
+          imageUrl,
+          dialogs,
+          timestamp: Date.now()
+        };
 
-      // 超过上限时淘汰最早条目
-      const entries = Object.entries(cache);
-      const MAX_ENTRIES = 200;
-      if (entries.length > MAX_ENTRIES) {
-        entries.sort((a, b) => a[1].timestamp - b[1].timestamp);
-        const removeCount = entries.length - MAX_ENTRIES;
-        for (let i = 0; i < removeCount; i++) {
-          delete cache[entries[i][0]];
+        // 超过上限时淘汰最早条目
+        const entries = Object.entries(cache);
+        const MAX_ENTRIES = 200;
+        if (entries.length > MAX_ENTRIES) {
+          entries.sort((a, b) => a[1].timestamp - b[1].timestamp);
+          const removeCount = entries.length - MAX_ENTRIES;
+          for (let i = 0; i < removeCount; i++) {
+            delete cache[entries[i][0]];
+          }
+          console.log(`[Cache] 淘汰 ${removeCount} 条最早缓存`);
         }
-        console.log(`[Cache] 淘汰 ${removeCount} 条最早缓存`);
-      }
 
-      await this.saveAll(cache);
-      console.log(`[Cache] 💾 已保存: ${imageUrl.substring(0, 50)}... (共 ${Object.keys(cache).length} 条)`);
-    } catch (e) {
-      console.warn('[Cache] 保存条目失败:', e);
-    }
+        await this.saveAll(cache);
+        console.log(`[Cache] 💾 已保存: ${imageUrl.substring(0, 50)}... (共 ${Object.keys(cache).length} 条)`);
+      } catch (e) {
+        console.warn('[Cache] 保存条目失败:', e);
+      }
+    });
   }
 
   /**
    * 删除指定图片的缓存
    */
   async delete(imageUrl: string): Promise<void> {
-    try {
-      const cache = await this.loadAll();
-      if (cache[imageUrl]) {
-        delete cache[imageUrl];
-        await this.saveAll(cache);
-        console.log(`[Cache] 🗑️ 已删除: ${imageUrl.substring(0, 50)}...`);
+    await this.withWriteLock(async () => {
+      try {
+        const cache = await this.loadAll();
+        if (cache[imageUrl]) {
+          delete cache[imageUrl];
+          await this.saveAll(cache);
+          console.log(`[Cache] 🗑️ 已删除: ${imageUrl.substring(0, 50)}...`);
+        }
+      } catch (e) {
+        console.warn('[Cache] 删除条目失败:', e);
       }
-    } catch (e) {
-      console.warn('[Cache] 删除条目失败:', e);
-    }
+    });
   }
 
   /**
    * 清空全部缓存
    */
   async clearAll(): Promise<void> {
-    try {
-      await chrome.storage.local.remove([CACHE_STORAGE_KEY]);
-      console.log('[Cache] 🔄 已清空全部缓存');
-    } catch (e) {
-      console.warn('[Cache] 清空缓存失败:', e);
-    }
+    await this.withWriteLock(async () => {
+      try {
+        await chrome.storage.local.remove([CACHE_STORAGE_KEY]);
+        console.log('[Cache] 🔄 已清空全部缓存');
+      } catch (e) {
+        console.warn('[Cache] 清空缓存失败:', e);
+      }
+    });
   }
 
   /**

@@ -68,9 +68,18 @@ export class TranslationOverlayManager {
   // 每张图片的控制按钮
   private controlButtonMap: Map<HTMLImageElement, HTMLElement> = new Map();
 
+  // 每张图片的"重新翻译"按钮（翻译失败时显示）
+  private retranslateButtonMap: Map<HTMLImageElement, HTMLElement> = new Map();
+
   // 控制按钮的 position-updater（用于 scroll/resize 时重新计算 fixed 定位）
   private positionUpdaters: Array<() => void> = [];
   private scrollListenerBound = false;
+
+  /**
+   * "重新翻译"按钮点击回调（由 content-script 注入）
+   * 参数为被点击的图片元素
+   */
+  onRetranslate: ((imageElement: HTMLImageElement) => void) | null = null;
 
   /**
    * 创建或获取覆盖层容器（每张图片独立的容器）
@@ -168,6 +177,35 @@ export class TranslationOverlayManager {
       this.toggleOverlayVisibility(imageElement, toggleBtn, container);
     });
 
+    // 重新翻译按钮（翻译失败时显示，位于显示/隐藏按钮左侧）
+    const retryBtn = document.createElement('button');
+    retryBtn.className = 'ml-retranslate-btn';
+    retryBtn.title = '重新翻译（跳过OCR，直接重发翻译请求）';
+    retryBtn.innerHTML = '🔄'; // 重新翻译图标
+    retryBtn.style.cssText = `
+      background: rgba(255, 102, 102, 0.9);
+      border: none;
+      color: white;
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      cursor: pointer;
+      font-size: 14px;
+      line-height: 1;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 0 6px rgba(255, 0, 0, 0.6);
+    `;
+    retryBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      if (this.onRetranslate) {
+        this.onRetranslate(imageElement);
+      }
+    });
+    this.retranslateButtonMap.set(imageElement, retryBtn);
+
     const decreaseBtn = btnContainer.querySelector('.ml-font-decrease')!;
     const increaseBtn = btnContainer.querySelector('.ml-font-increase')!;
     const scaleLabel = btnContainer.querySelector('.ml-font-scale')!;
@@ -213,7 +251,8 @@ export class TranslationOverlayManager {
       this.fontScaleMap.set(imageElement, this.defaultFontScale);
     }
 
-    // 组装 wrapper
+    // 组装 wrapper（重试按钮在最左，紧邻显示/隐藏按钮）
+    wrapper.appendChild(retryBtn);
     wrapper.appendChild(toggleBtn);
     wrapper.appendChild(btnContainer);
 
@@ -897,6 +936,13 @@ export class TranslationOverlayManager {
       console.log(`[Overlay] 📍 所有覆盖层元素 ID:`, ids.map(id => `#${id}`));
     }
 
+    // 根据是否存在翻译失败的对话，显示/隐藏"重新翻译"按钮
+    if (this.hasFailedDialog(dialogs)) {
+      this.showRetranslateButton(imageElement);
+    } else {
+      this.hideRetranslateButton(imageElement);
+    }
+
     return ids;
   }
 
@@ -1042,6 +1088,27 @@ export class TranslationOverlayManager {
   /** 获取指定图片的覆盖层容器元素 */
   getContainerForImage(imageElement: HTMLImageElement): HTMLElement | undefined {
     return this.containers.get(imageElement);
+  }
+
+  /** 显示指定图片的"重新翻译"按钮 */
+  showRetranslateButton(imageElement: HTMLImageElement): void {
+    const btn = this.retranslateButtonMap.get(imageElement);
+    if (btn) {
+      btn.style.display = 'flex';
+    }
+  }
+
+  /** 隐藏指定图片的"重新翻译"按钮 */
+  hideRetranslateButton(imageElement: HTMLImageElement): void {
+    const btn = this.retranslateButtonMap.get(imageElement);
+    if (btn) {
+      btn.style.display = 'none';
+    }
+  }
+
+  /** 判断指定图片是否翻译失败（存在 translationSuccess === false 的对话） */
+  private hasFailedDialog(dialogs: MergedDialog[]): boolean {
+    return dialogs.some((d) => d.translationSuccess === false);
   }
 
   /** 重新渲染指定图片的翻译（从缓存的MergedDialog数据恢复原版） */

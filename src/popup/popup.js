@@ -1,6 +1,6 @@
 /**
  * Popup Script - 弹出窗口逻辑
- * v3.1 - DeepSeek V4 Pro 翻译引擎
+ * v3.1 - DeepSeek V4.1 Flash 翻译引擎
  */
 
 // DOM 元素
@@ -26,6 +26,8 @@ const btnTestDirect = document.getElementById('btnTestDirect');
 // 本地缓存
 const toggleCacheEnabled = document.getElementById('toggleCacheEnabled');
 const localCacheCount = document.getElementById('localCacheCount');
+const btnExportCache = document.getElementById('btnExportCache');
+const btnClearCache = document.getElementById('btnClearCache');
 
 // 字体设置
 const fontSizeInput = document.getElementById('fontSize');
@@ -82,13 +84,16 @@ async function loadConfig() {
   const result = await chrome.storage.local.get([
     'apiKey', 'apiSecret', 'deepseekApiKey', 'isEnabled',
     'tencentSecretId', 'tencentSecretKey', 'directRegion', 'directAction',
-    'mangaLensFontSize', 'mangaLensBatchLimit'
+    'mangaLensFontSize', 'mangaLensBatchLimit', 'mangaLensCacheEnabled'
   ]);
   
   if (result.deepseekApiKey) {
     deepseekKeyInput.value = result.deepseekApiKey;
   }
   toggleEnabled.checked = result.isEnabled !== false;
+  
+  // 本地缓存读取开关：直接读取存储状态回显（默认开启）
+  toggleCacheEnabled.checked = result.mangaLensCacheEnabled !== false;
   
   // OCR 直接API配置（默认使用高精度OCR）
   if (result.tencentSecretId) {
@@ -176,7 +181,7 @@ btnTest.addEventListener('click', async () => {
         'Authorization': `Bearer ${deepseekKey}`
       },
       body: JSON.stringify({
-        model: 'deepseek-v4-pro',
+        model: 'deepseek-flash',
         messages: [
           { role: 'user', content: '你好' }
         ],
@@ -422,6 +427,10 @@ toggleEnabled.addEventListener('change', async () => {
 toggleCacheEnabled.addEventListener('change', async () => {
   const enabled = toggleCacheEnabled.checked;
 
+  // 🔧 直接持久化到 storage，确保刷新页面/重新打开 popup 后状态一致
+  await chrome.storage.local.set({ mangaLensCacheEnabled: enabled });
+
+  // 同时通知 content-script 更新内存中的缓存开关状态
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (tab.id) {
@@ -431,7 +440,8 @@ toggleCacheEnabled.addEventListener('change', async () => {
       });
     }
   } catch (error) {
-    console.error('切换缓存状态失败:', error);
+    // content-script 不在当前页面时忽略（状态已持久化到 storage）
+    console.warn('通知 content-script 切换缓存状态失败（已持久化到 storage）:', error);
   }
 
   await updateStatus();
@@ -449,6 +459,65 @@ document.querySelectorAll('.tab').forEach(tab => {
     const targetId = `tab-${tab.dataset.tab}`;
     document.getElementById(targetId).classList.add('active');
   });
+});
+
+// 导出本地缓存为 JSON 文件（调试用）
+btnExportCache.addEventListener('click', async () => {
+  try {
+    const result = await chrome.storage.local.get(['mangaLensCache']);
+    const cache = result.mangaLensCache || {};
+    const entries = Object.keys(cache).length;
+
+    if (entries === 0) {
+      showAlert('本地缓存为空，无内容可导出', 'warning');
+      return;
+    }
+
+    // 生成格式化 JSON，附带元信息便于调试
+    const exportData = {
+      exportedAt: new Date().toISOString(),
+      totalEntries: entries,
+      entries: Object.entries(cache).map(([url, entry]) => ({
+        url,
+        timestamp: entry.timestamp,
+        timestampReadable: entry.timestamp ? new Date(entry.timestamp).toLocaleString() : null,
+        dialogCount: entry.dialogs ? entry.dialogs.length : 0,
+        dialogs: entry.dialogs
+      }))
+    };
+
+    const json = JSON.stringify(exportData, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `mangalens-cache-${new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    showAlert(`✅ 已导出 ${entries} 条缓存为 JSON 文件`, 'success');
+  } catch (error) {
+    console.error('导出缓存失败:', error);
+    showAlert('导出缓存失败: ' + error.message, 'error');
+  }
+});
+
+// 清空本地缓存（调试用，二次确认）
+btnClearCache.addEventListener('click', async () => {
+  const confirmed = confirm('确定要清空全部本地翻译缓存吗？\n\n清空后所有已翻译的图片刷新页面时将重新调用 API 翻译。');
+  if (!confirmed) return;
+
+  try {
+    await chrome.storage.local.remove(['mangaLensCache']);
+    localCacheCount.textContent = '0';
+    showAlert('✅ 已清空全部本地缓存', 'success');
+  } catch (error) {
+    console.error('清空缓存失败:', error);
+    showAlert('清空缓存失败: ' + error.message, 'error');
+  }
 });
 
 // 页面加载完成后初始化

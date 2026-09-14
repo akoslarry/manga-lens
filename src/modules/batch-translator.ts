@@ -2,7 +2,7 @@
  * 批量翻译模块
  * 
  * 专为漫画对话批量翻译设计：
- * 1. 将多段对话打包发送给 DeepSeek V4 Pro API
+ * 1. 将多段对话打包发送给 DeepSeek V4.1 Flash API
  * 2. 使用严格格式的 Prompt，确保返回结果可解析
  * 3. 按编号映射翻译结果到原始对话
  */
@@ -52,7 +52,7 @@ export interface BatchTranslationConfig {
 const DEFAULT_CONFIG: Required<BatchTranslationConfig> = {
   apiKey: '',
   endpoint: 'https://api.deepseek.com/v1/chat/completions',
-  model: 'deepseek-v4-pro',
+  model: 'deepseek-flash',
   temperature: 0.7,
   maxTokens: 4000,
   // 【修改】每张图片一次翻译通信，不再分批
@@ -299,7 +299,7 @@ export class BatchTranslator {
   }
 
   /**
-   * 调用 DeepSeek V4 Pro API
+   * 调用 DeepSeek V4.1 Flash API
    */
   private async callDeepSeekAPI(
     items: Array<{ id: number; text: string }>

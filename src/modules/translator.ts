@@ -104,7 +104,7 @@ export class Translator {
   }
 
   /**
-   * 使用 DeepSeek V4 Pro API 翻译
+   * 使用 DeepSeek V4.1 Flash API 翻译
    */
   private async translateWithDeepSeek(text: string): Promise<TranslationResult> {
     const apiKey = this.config.deepseekApiKey!;
@@ -116,7 +116,7 @@ export class Translator {
         'Authorization': `Bearer ${apiKey}`
       },
       body: JSON.stringify({
-        model: 'deepseek-v4-pro',
+        model: 'deepseek-flash',
         messages: [
           {
             role: 'system',
