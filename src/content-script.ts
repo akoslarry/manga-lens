@@ -925,6 +925,15 @@ async function initialize(): Promise<void> {
       onAutoSave: async () => {
         // 🔧 导出PDF前的静默自动保存（无需用户确认，同"保留修改"逻辑）
         await handlePdfModeAutoSave();
+      },
+      onSaveRequest: async () => {
+        // 🔧 用户点击工具栏「💾 保存」：强制持久化且不退出编辑模式
+        await handlePdfModeSave();
+      },
+      onOverlayGeometryChange: (overlay: HTMLElement) => {
+        // 🔧 用户手动调整尺寸/位置后，直接撤下溢出提示
+        //    人工调整即为已知意图，不做复检（否则故意缩小时标记永远无法消除）
+        overlayManager.handleManualGeometryChange(overlay);
       }
     });
 
@@ -1058,15 +1067,19 @@ function showCustomConfirm(message: string): Promise<boolean> {
 }
 
 async function handlePdfModeExit(): Promise<void> {
-  // 🔧 退出前始终静默持久化当前编辑状态（防止 resize/文字编辑等未触发脏标记的修改丢失）
-  if (pdfModeEditDirty) {
-    console.log('[MangaLens] 🔄 退出PDF模式前自动保存编辑...');
-    await handlePdfModeAutoSave();
+  // 🔧 无未保存修改时（例如用户刚点过「💾 保存」且之后未再改动），
+  //    直接退出，不弹确认窗，避免无谓打扰。
+  if (!pdfModeEditDirty) {
+    console.log('[MangaLens] 无未保存修改，直接退出PDF模式');
+    pdfExporter.exitPdfMode();
+    pdfModeSavePath = '';
+    return;
   }
 
-  // 🔧 增加保护：即使 dirty 标记未设置，也可能存在未保存的覆盖层状态
-  //    （如 resize、纯文字编辑等未调用 onSaveEdits 的场景）
-  //    通过检查覆盖层快照与缓存的差异来决定是否弹确认窗
+  // 有未保存修改 → 先静默持久化一次（防止 resize/文字编辑等场景丢失）
+  console.log('[MangaLens] 🔄 退出PDF模式前自动保存编辑...');
+  await handlePdfModeAutoSave();
+
   const confirmMessage = '即将退出PDF导出模式。\n\n' +
     '点击"保存"：保存您的手动调整，覆盖原始翻译结果\n' +
     '点击"恢复"：丢弃手动修改，恢复到翻译时的原始状态';
@@ -1180,8 +1193,27 @@ async function handlePdfModeExit(): Promise<void> {
 /** 导出PDF前的静默自动保存（无需用户确认，同"保留修改"逻辑） */
 async function handlePdfModeAutoSave(): Promise<void> {
   if (!pdfModeEditDirty) return; // 无修改，无需保存
-
   console.log('[MangaLens] 🔄 导出前自动保存编辑...');
+  await persistPdfEdits();
+}
+
+/**
+ * 用户点击工具栏「💾 保存」按钮
+ *
+ * 与自动保存的区别：忽略 dirty 标志，用户点击即强制持久化；
+ * 保存完成后重置 dirty（用于判定退出时是否需要弹窗），且不退出编辑模式。
+ */
+async function handlePdfModeSave(): Promise<void> {
+  console.log('[MangaLens] 💾 用户手动保存编辑...');
+  await persistPdfEdits();
+  pdfModeEditDirty = false;
+  console.log('[MangaLens] ✅ 手动保存完成（仍停留在 PDF 编辑模式）');
+}
+
+/**
+ * 执行 PDF 编辑结果的持久化（核心逻辑，供自动保存与手动保存复用）
+ */
+async function persistPdfEdits(): Promise<void> {
   const customFontSizes = pdfExporter.getCustomFontSizes();
   const customOpacities = pdfExporter.getCustomOpacities();
   const deletedIds = pdfExporter.getDeletedDialogIds();
@@ -1247,8 +1279,7 @@ async function handlePdfModeAutoSave(): Promise<void> {
 
     await translationCache.set(img.src, cachedDialogs);
   }
-  pdfModeEditDirty = false;
-  console.log('[MangaLens] ✅ 编辑已自动保存到本地缓存');
+  console.log('[MangaLens] ✅ 编辑已保存到本地缓存');
 }
 
 // Listen for messages from popup or background

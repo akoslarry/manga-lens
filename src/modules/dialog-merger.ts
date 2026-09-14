@@ -72,6 +72,14 @@ export interface MergedDialog {
   };
   /** 用户手动设定的覆盖层背景透明度（0-1），null/undefined 表示使用全局默认值 */
   customOpacity?: number;
+  /**
+   * 字体大小计算版本号
+   *
+   * 用于缓存迁移：当读取本地缓存时，若该字段缺失或低于当前
+   * FONT_SIZE_ALGO_VERSION，则说明该条目是用旧算法计算的字体大小，
+   * 需要用最新的算法重新计算并回写缓存。
+   */
+  fontSizeVersion?: number;
 }
 
 /** 翻译后的对话（带完整翻译信息） */

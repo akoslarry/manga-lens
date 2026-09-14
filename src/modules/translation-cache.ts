@@ -9,6 +9,7 @@
  */
 
 import type { MergedDialog } from './dialog-merger';
+import { FONT_SIZE_ALGO_VERSION } from './font-fitter';
 
 const CACHE_STORAGE_KEY = 'mangaLensCache';
 const CACHE_ENABLED_KEY = 'mangaLensCacheEnabled';
@@ -20,6 +21,13 @@ interface CachedEntry {
   dialogs: MergedDialog[];
   /** 缓存时间戳 */
   timestamp: number;
+  /**
+   * 字体大小算法版本号（条目级）
+   *
+   * 与每个 dialog 的 fontSizeVersion 保持一致，冗余存储在条目上便于快速判断
+   * 整条缓存是否需要迁移。低于 FONT_SIZE_ALGO_VERSION 时会在读取时触发重算。
+   */
+  fontSizeVersion?: number;
 }
 
 class TranslationCache {
@@ -122,6 +130,16 @@ class TranslationCache {
         } else {
           console.log(`[Cache] ✅ 命中（纯场景页，无文字）: ${imageUrl.substring(0, 50)}...`);
         }
+
+        // 🔧 字体算法版本迁移：版本缺失或落后时，标记并回写缓存
+        //    字号本身不持久化（渲染时实时计算），因此只需升版本号，
+        //    渲染阶段会自动使用最新算法重新计算字体大小。
+        if (this.needsFontSizeMigration(entry)) {
+          this.migrateFontSizeVersion(imageUrl, entry).catch((e) => {
+            console.warn('[Cache] 字体版本迁移回写失败:', e);
+          });
+        }
+
         return entry.dialogs;
       }
       // 未命中：打印查询 key 与缓存中存在的 key，辅助定位 key 不匹配问题
@@ -139,6 +157,41 @@ class TranslationCache {
     return null;
   }
 
+  /** 判断条目是否需要字体算法版本迁移 */
+  private needsFontSizeMigration(entry: CachedEntry): boolean {
+    const entryVer = entry.fontSizeVersion;
+    if (entryVer === undefined || entryVer < FONT_SIZE_ALGO_VERSION) return true;
+    // 兼容早期只写了 dialog 级版本号、条目级缺失的情况
+    return (entry.dialogs || []).some(
+      (d) => d.fontSizeVersion === undefined || d.fontSizeVersion < FONT_SIZE_ALGO_VERSION
+    );
+  }
+
+  /**
+   * 将条目的字体算法版本升级到当前版本并回写缓存
+   *
+   * 说明：字号不持久化，渲染时按最新算法实时计算，因此迁移只需更新版本标记，
+   * 无需修改 dialogs 的其他数据；用户的手动调整（customFontSize 等）会被保留。
+   */
+  private async migrateFontSizeVersion(imageUrl: string, entry: CachedEntry): Promise<void> {
+    await this.withWriteLock(async () => {
+      const cache = await this.loadAll();
+      const current = cache[imageUrl];
+      if (!current) return;
+
+      // 保留用户手动设置的字体大小，不因算法升级而清空
+      for (const d of current.dialogs || []) {
+        d.fontSizeVersion = FONT_SIZE_ALGO_VERSION;
+      }
+      current.fontSizeVersion = FONT_SIZE_ALGO_VERSION;
+
+      await this.saveAll(cache);
+      console.log(
+        `[Cache] 🔄 字体算法已迁移至 v${FONT_SIZE_ALGO_VERSION}: ${imageUrl.substring(0, 50)}...`
+      );
+    });
+  }
+
   /**
    * 保存指定图片的翻译结果
    */
@@ -146,10 +199,16 @@ class TranslationCache {
     await this.withWriteLock(async () => {
       try {
         const cache = await this.loadAll();
+        // 🔧 写入时统一打上当前字体算法版本号
+        //    每个 dialog 与条目本身都记录，便于后续按版本判断是否需重算
+        for (const d of dialogs) {
+          d.fontSizeVersion = FONT_SIZE_ALGO_VERSION;
+        }
         cache[imageUrl] = {
           imageUrl,
           dialogs,
-          timestamp: Date.now()
+          timestamp: Date.now(),
+          fontSizeVersion: FONT_SIZE_ALGO_VERSION
         };
 
         // 超过上限时淘汰最早条目

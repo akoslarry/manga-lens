@@ -11,6 +11,12 @@
 import type { BoundingBox } from './ocr-engine';
 import type { TranslationResult } from './translator';
 import type { MergedDialog, BubbleBounds } from './dialog-merger';
+import {
+  computeAdaptiveFontSize,
+  refineFontSizeByMeasurement,
+  FONT_SIZE_ALGO_VERSION,
+  DEFAULT_FONT_FIT_CONFIG
+} from './font-fitter';
 
 export interface TranslationOverlay {
   id: string;
@@ -35,6 +41,14 @@ export interface RenderConfig {
   /** 最大行数（超过则截断） */
   maxLines?: number;
 }
+
+/**
+ * 历史默认基础字号（px）
+ *
+ * 算法 v1 起，用户配置的「基础字号」作为整体调整基准，
+ * 该常量是 1.0 系数对应的参考值（即用户设为 22px 时不影响自适应结果）。
+ */
+const DEFAULT_BASE_FONT_SIZE = 22;
 
 const DEFAULT_RENDER_CONFIG: Required<RenderConfig> = {
   horizontalText: false,  // 改为竖排（与日语原文一致）
@@ -63,7 +77,21 @@ export class TranslationOverlayManager {
   private maxFontScale = 3.0;
 
   // 用户可配置的基础字号（单位 px，持久化到 storage）
+  // 🔧 算法 v1 起：该值不再直接作为字号，而是作为「自适应字号的整体调整基准」
   private baseFontSize = 22;
+
+  // 可读下限（px）：自适应计算不得低于此值，宁可溢出也不牺牲可读性
+  private minFontSize = 10;
+
+  // 上次计算得到的基准字号（overlayId → px），用于字体缩放与全局字号变更时重算
+  private baseFontSizeMap: Map<string, number> = new Map();
+
+  /**
+   * 已被用户手动调整过几何尺寸的对话 ID 集合
+   *
+   * 这些对话不再由系统添加溢出提示——用户已知意图，系统不与其对抗。
+   */
+  private manuallyAdjustedDialogs: Set<number> = new Set();
 
   // 每张图片的控制按钮
   private controlButtonMap: Map<HTMLImageElement, HTMLElement> = new Map();
@@ -354,7 +382,10 @@ export class TranslationOverlayManager {
 
   /**
    * 设置基础字体大小（由 popup 设置界面触发）
-   * 同时更新所有已渲染覆盖层的字体大小
+   *
+   * 🔧 算法 v1 起语义变化：该值不再直接作为字号使用，而是作为
+   *    「自适应字号的整体调整基准」。用户调整它会整体增减各气泡的字号，
+   *    但每个气泡仍保留自身的相对大小（视觉分级不丢失）。
    */
   setBaseFontSize(size: number): void {
     this.baseFontSize = Math.max(10, Math.min(36, size));
@@ -364,20 +395,34 @@ export class TranslationOverlayManager {
   }
 
   /**
-   * 将当前 baseFontSize × 各图片 scale 应用到所有已渲染覆盖层
+   * 将「各覆盖层自身的自适应基准字号 × 基础字号调整系数 × 图片缩放」应用到所有覆盖层
+   *
+   * 与算法 v1 之前的区别：之前是「全局固定字号 × 缩放」，
+   * 现在保留每个气泡自适应算出的基准字号，只叠加整体调整系数，
+   * 从而在大框标题、小框说明等场景下依然保持视觉分级。
    */
   private applyBaseFontSizeToAllOverlays(): void {
+    // 整体调整系数 = 用户设定值 / 22（22 为历史默认值，保证默认状态下不改变自适应结果）
+    const globalFactor = this.baseFontSize / DEFAULT_BASE_FONT_SIZE;
+
     this.containers.forEach((container, imageElement) => {
       const scale = this.fontScaleMap.get(imageElement) || this.defaultFontScale;
-      const newFontSize = this.baseFontSize * scale;
 
       this.overlays.forEach((overlay) => {
         if (container.contains(overlay.element)) {
+          // 优先使用该覆盖层缓存的基准字号；无缓存时回退到全局基准
+          const base = this.baseFontSizeMap.get(overlay.id) ?? DEFAULT_BASE_FONT_SIZE;
+          const newFontSize = Math.max(
+            this.minFontSize,
+            base * globalFactor * scale
+          );
           overlay.element.style.fontSize = `${newFontSize}px`;
         }
       });
     });
-    console.log(`[Overlay] 已更新所有覆盖层字体: baseFontSize=${this.baseFontSize}px`);
+    console.log(
+      `[Overlay] 已更新所有覆盖层字体: 全局调整系数=${globalFactor.toFixed(2)}`
+    );
   }
 
   /**
@@ -415,15 +460,23 @@ export class TranslationOverlayManager {
    */
   private applyFontScaleToOverlays(imageElement: HTMLImageElement): void {
     const scale = this.fontScaleMap.get(imageElement) || this.defaultFontScale;
-    const newFontSize = this.baseFontSize * scale;
+    const globalFactor = this.baseFontSize / DEFAULT_BASE_FONT_SIZE;
 
     this.overlays.forEach((overlay, id) => {
       // 只更新属于该图片的覆盖层
       if (this.isOverlayBelongsToImage(overlay, imageElement)) {
+        // 保留该覆盖层自适应算出的基准字号，仅叠加缩放系数
+        const base = this.baseFontSizeMap.get(id) ?? DEFAULT_BASE_FONT_SIZE;
+        const newFontSize = Math.max(
+          this.minFontSize,
+          base * globalFactor * scale
+        );
         overlay.element.style.fontSize = `${newFontSize}px`;
       }
     });
-    console.log(`[Overlay] 字体缩放: ${Math.round(scale * 100)}% (${newFontSize}px)`);
+    console.log(
+      `[Overlay] 字体缩放: ${Math.round(scale * 100)}% (基准字号自适应保留)`
+    );
   }
 
   /**
@@ -580,6 +633,7 @@ export class TranslationOverlayManager {
     });
     this.controlButtonMap.clear();
     this.positionUpdaters = [];
+    this.baseFontSizeMap.clear();
 
     // 移除全局 scroll/resize 监听
     if (this.scrollListenerBound) {
@@ -616,6 +670,8 @@ export class TranslationOverlayManager {
     this.overlays.forEach((overlay, id) => {
       if (!document.getElementById(id)) {
         this.overlays.delete(id);
+        // 同步清理该覆盖层缓存的基准字号，避免 Map 无限增长
+        this.baseFontSizeMap.delete(id);
       }
     });
 
@@ -831,17 +887,39 @@ export class TranslationOverlayManager {
     overlay.className = this.overlayClass;
     overlay.textContent = translatedText;
     overlay.dataset.dialogId = String(dialog.id); // 关联 MergedDialog，用于持久化单覆盖层字体大小
+    // 记录纯译文，供溢出复检时判断内容（避免角标等子元素文字干扰）
+    overlay.dataset.mlPlainText = translatedText;
 
-    // 计算字体大小（基于原文平均字符宽度和翻译后字符数）
-    // 🔧 如果用户保存了自定义字体大小，优先使用
+    // 计算字体大小（算法 v1：几何适配 + 视觉分级）
+    // 🔧 如果用户保存了自定义字体大小，优先使用（用户手动值覆盖所有自动计算）
     let fontSize: number;
+    let baseFontSize: number;
+    let fitOverflow = false;
+    let fitOverflowRatio = 0;
+
     if (dialog.customFontSize) {
       fontSize = dialog.customFontSize;
+      baseFontSize = dialog.customFontSize;
     } else {
-      const baseFontSize = this.calculateFontSizeForDialog(dialog, translatedText, safeBounds.width, cfg);
+      // 可用区域 = 覆盖层实际像素尺寸（已扣除内边距）
+      const padding = cfg.padding * 2;
+      const fit = this.calculateFontSizeForDialog(
+        dialog,
+        translatedText,
+        Math.max(1, pixelWidth - padding),
+        Math.max(1, pixelHeight - padding),
+        isVertical,
+        cfg
+      );
+      baseFontSize = fit.fontSize;
+      fitOverflow = fit.overflow;
+      fitOverflowRatio = fit.overflowRatio;
+      // 用户对整张图片的缩放系数，作用于自适应基准字号
       const fontScale = this.getFontScale(imageElement);
       fontSize = baseFontSize * fontScale;
     }
+    // 缓存基准字号，供字体缩放/全局字号变更时重算
+    this.baseFontSizeMap.set(id, baseFontSize);
     
     // 构建样式
     // 🔧 支持单覆盖层自定义透明度：dialog.customOpacity > cfg.backgroundOpacity（全局默认）
@@ -887,6 +965,40 @@ export class TranslationOverlayManager {
 
     container.appendChild(overlay);
 
+    // 🔧 迭代收敛：元素入 DOM 后，以浏览器真实排版为准精修字号
+    //    仅对自动计算的覆盖层生效；用户自定义字号的覆盖层不做干预
+    if (!dialog.customFontSize) {
+      const padding = cfg.padding * 2;
+      const refined = refineFontSizeByMeasurement(
+        translatedText,
+        overlay,
+        Math.max(1, pixelWidth - padding),
+        Math.max(1, pixelHeight - padding),
+        fontSize,
+        this.minFontSize,
+        DEFAULT_FONT_FIT_CONFIG.maxFontSize
+      );
+
+      if (Math.abs(refined.fontSize - fontSize) > 0.5) {
+        fontSize = refined.fontSize;
+        // 回填基准字号（去除用户缩放系数），供后续缩放/全局字号变更重算
+        const fontScale = this.getFontScale(imageElement) || 1;
+        baseFontSize = fontSize / fontScale;
+        this.baseFontSizeMap.set(id, baseFontSize);
+        overlay.style.fontSize = `${fontSize}px`;
+      }
+      fitOverflow = refined.overflow;
+      fitOverflowRatio = refined.overflowRatio;
+    }
+
+    // 标记溢出：即使压到可读下限仍装不下，提示用户手动调整（不自动改框）
+    // 🔧 例外：用户已手动调整过该对话的尺寸/位置，或已手动设定字号时，
+    //    不再添加提示——尊重用户已知意图，避免标记无法消除。
+    const userHandled = this.manuallyAdjustedDialogs.has(dialog.id) || !!dialog.customFontSize;
+    if (fitOverflow && !userHandled) {
+      this.markOverflow(overlay, fitOverflowRatio);
+    }
+
     // 记录覆盖层
     this.overlays.set(id, {
       id,
@@ -896,6 +1008,84 @@ export class TranslationOverlayManager {
     });
 
     return id;
+  }
+
+  /**
+   * 标记覆盖层溢出
+   *
+   * 设计约定：不自动扩大文本框（避免用户失去原始位置参考），
+   * 而是用视觉提示（角标 + tooltip + 描边）告知用户需要手动调整。
+   */
+  private markOverflow(overlay: HTMLElement, overflowRatio: number): void {
+    if (overlay.dataset.mlOverflow === '1') return;
+    overlay.dataset.mlOverflow = '1';
+
+    const severity = overflowRatio > 0.5 ? '明显' : '轻微';
+    // 🔧 用 box-shadow 而非 outline 表达溢出描边：
+    //    PDF 编辑模式会给覆盖层加蓝色 outline（不会触及 box-shadow），
+    //    退出编辑时又会把 outline 清空。若溢出提示也用 outline 会被覆盖或清除。
+    overlay.style.boxShadow =
+      '0 0 0 1px #ffb84d, 0 1px 3px rgba(0, 0, 0, 0.15)';
+    overlay.title = `译文${severity}超出气泡范围，可进入 PDF 导出模式拖拽放大文本框`;
+
+    // 右上角角标：圆形底 + 放大图标（与现有按钮风格统一）
+    const badge = document.createElement('span');
+    badge.className = 'ml-overflow-badge';
+    badge.textContent = '⤢';
+    badge.style.cssText = `
+      position: absolute;
+      top: -9px;
+      right: -9px;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: rgba(255, 152, 0, 0.92);
+      color: #fff;
+      font-size: 10px;
+      line-height: 16px;
+      text-align: center;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+      pointer-events: none;
+      z-index: 2;
+    `;
+    // 覆盖层自身为 flex 布局，角标需绝对定位，挂到 overlay 上
+    overlay.appendChild(badge);
+  }
+
+  /**
+   * 清除覆盖层的溢出标记（角标 + 描边 + tooltip）
+   *
+   * 用于用户在 PDF 模式下手动放大文本框后，溢出已解决时即时撤下提示。
+   */
+  private clearOverflowMark(overlay: HTMLElement): void {
+    // 不依赖 dataset 标记：即使标记缺失也要清理残留的角标，确保撤下干净
+    delete overlay.dataset.mlOverflow;
+
+    overlay.querySelectorAll('.ml-overflow-badge').forEach((b) => b.remove());
+    // 恢复基础投影（与渲染时的初始 box-shadow 一致）
+    overlay.style.boxShadow = '0 1px 3px rgba(0, 0, 0, 0.15)';
+    // 若 tooltip 是本模块写入的溢出提示才清除，避免误删翻译失败提示
+    if (overlay.title && overlay.title.includes('超出气泡范围')) {
+      overlay.title = '';
+    }
+  }
+
+  /**
+   * 用户手动调整覆盖层几何尺寸后的处理（供 PDF 编辑模式调用）
+   *
+   * 设计决策：**不做溢出复检，直接撤下溢出提示。**
+   *
+   * 理由：用户手动调整即代表其已知意图，系统无需再评判结果。
+   * 若调整为「故意很小的文本框」，复检会导致标记永远无法消除，
+   * 与用户意图对抗。因此一律清除提示，并把该覆盖层标记为「已人工处理」，
+   * 后续渲染也不再为其添加溢出标记。
+   */
+  handleManualGeometryChange(overlay: HTMLElement): void {
+    this.clearOverflowMark(overlay);
+    // 记录人工处理过，避免后续（如重新渲染）再次打上提示
+    if (overlay.dataset.dialogId !== undefined) {
+      this.manuallyAdjustedDialogs.add(Number(overlay.dataset.dialogId));
+    }
   }
 
   /**
@@ -973,36 +1163,75 @@ export class TranslationOverlayManager {
   }
 
   /**
-   * 基于对话信息计算字体大小
-   * 
-   * 算法（v2）：
-   * 1. 以用户保存的 baseFontSize 为基准（而非 OCR 原始字符宽度）
-   * 2. 如果译文字符数多于原文，按比例缩小以适应气泡
-   * 3. 确保字体大小在合理范围内（不低于10px，不高于 config.fontSize）
+   * 推算原文的实际字符高度（像素，OCR 坐标系）
+   *
+   * 竖排文字：字符逐个沿 Y 轴堆叠，因此「字符高度」≈ 单个片段的宽度
+   * 横排文字：字符沿 X 轴排列，因此「字符高度」≈ 单个片段的高度
+   *
+   * 取各片段的中位数，避免个别异常片段（如被合并的长行）拉偏结果。
+   */
+  private estimateOriginalCharHeight(dialog: MergedDialog, isVertical: boolean): number | undefined {
+    const items = dialog.items;
+    if (!items || items.length === 0) return undefined;
+
+    const sizes: number[] = [];
+    for (const item of items) {
+      const v = isVertical ? item.width : item.height;
+      if (v && v > 0) sizes.push(v);
+    }
+    if (sizes.length === 0) return undefined;
+
+    sizes.sort((a, b) => a - b);
+    const mid = Math.floor(sizes.length / 2);
+    const median = sizes.length % 2 === 0 ? (sizes[mid - 1] + sizes[mid]) / 2 : sizes[mid];
+    return median > 0 ? median : undefined;
+  }
+
+  /**
+   * 计算单条对话的自适应字号（算法 v1）
+   *
+   * 设计（详见 modules/font-fitter.ts）：
+   * 1. 几何适配：按框宽高与译文字符数推导「刚好填满」的字号
+   * 2. 视觉分级：参考原文实际字符高度，保留原文的大小对比（拟声词大、小字说明小）
+   * 3. 可读下限：字号不得低于 minFontSize，宁可溢出也不牺牲可读性
+   * 4. 迭代收敛：由调用方（renderMergedDialog）在元素入 DOM 后基于真实测量精修
+   *
+   * 注意：本方法返回的是「基准字号」，不含用户对该图片的缩放系数（fontScale）。
    */
   private calculateFontSizeForDialog(
     dialog: MergedDialog,
     translatedText: string,
     boxWidth: number,
-    config: Required<RenderConfig>
-  ): number {
-    const translatedCharCount = translatedText.length;
-    const ocrCharCount = dialog.charCount;
-    const referenceSize = this.baseFontSize;
+    boxHeight: number,
+    isVertical: boolean,
+    _config: Required<RenderConfig>
+  ): { fontSize: number; overflow: boolean; overflowRatio: number } {
+    const originalCharHeight = this.estimateOriginalCharHeight(dialog, isVertical);
 
-    // 如果翻译后字符增多，按比例缩小以保证文字能装进气泡
-    if (translatedCharCount > ocrCharCount && ocrCharCount > 0) {
-      const scaleFactor = Math.sqrt(ocrCharCount / translatedCharCount);
-      const adjusted = referenceSize * scaleFactor;
-      const finalFontSize = Math.max(10, adjusted);
-      
-      console.log(`[Overlay] 字体计算: baseFontSize=${referenceSize}px, 原文${ocrCharCount}字→译文${translatedCharCount}字, scale=${scaleFactor.toFixed(2)}, 最终=${finalFontSize.toFixed(1)}px`);
-      return finalFontSize;
-    }
+    const result = computeAdaptiveFontSize(translatedText, {
+      boxWidth,
+      boxHeight,
+      isVertical,
+      lineHeight: DEFAULT_FONT_FIT_CONFIG.lineHeight,
+      fillRatio: DEFAULT_FONT_FIT_CONFIG.fillRatio,
+      minFontSize: this.minFontSize,
+      maxFontSize: DEFAULT_FONT_FIT_CONFIG.maxFontSize,
+      originalCharHeight,
+      originalWeight: DEFAULT_FONT_FIT_CONFIG.originalWeight
+    });
 
-    // 译文不长于原文，直接使用用户设置的基准字体大小
-    console.log(`[Overlay] 字体计算: baseFontSize=${referenceSize}px, 原文${ocrCharCount}字→译文${translatedCharCount}字, 最终=${referenceSize}px`);
-    return referenceSize;
+    console.log(
+      `[Overlay] 字体自适应: 框=${boxWidth.toFixed(0)}x${boxHeight.toFixed(0)}, ` +
+      `译文${translatedText.length}字, 原文高=${originalCharHeight?.toFixed(1) ?? 'N/A'}, ` +
+      `策略=${result.strategy}, 字号=${result.fontSize.toFixed(1)}px` +
+      (result.overflow ? ` ⚠️溢出(${(result.overflowRatio * 100).toFixed(0)}%)` : '')
+    );
+
+    return {
+      fontSize: result.fontSize,
+      overflow: result.overflow,
+      overflowRatio: result.overflowRatio
+    };
   }
 
   /**

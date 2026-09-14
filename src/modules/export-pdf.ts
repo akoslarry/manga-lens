@@ -38,6 +38,19 @@ export interface PDFExporterCallbacks {
   onSaveEdits: (imageSrc: string, overlays: HTMLElement[]) => void;
   /** 静默自动保存（导出PDF前触发，无需用户确认） */
   onAutoSave: () => Promise<void>;
+  /**
+   * 用户点击工具栏「💾 保存」按钮
+   *
+   * 要求：强制持久化当前所有修改到本地缓存，**不退出** PDF 编辑模式。
+   * 与 onAutoSave 的区别在于忽略"是否有修改"的判断，用户点击即保存。
+   */
+  onSaveRequest?: () => Promise<void>;
+  /**
+   * 覆盖层几何尺寸变更后触发（拖拽缩放/移动结束）
+   *
+   * 用于在用户手动调整后撤下溢出提示（人工调整即已知意图，不做复检）。
+   */
+  onOverlayGeometryChange?: (overlay: HTMLElement) => void;
 }
 
 // ============================================
@@ -61,12 +74,15 @@ export class PDFExporter {
   private globalOpacity = 0.88;                           // 全局默认背景透明度
   private deletedDialogIds = new Set<number>();           // 用户删除的 MergedDialog id，持久化时从缓存中移除
   private imageDataUrlCache = new Map<string, string>(); // imageSrc → dataURL 缓存(解决CORS)
+  private failedImages = new Map<string, string>();      // imageSrc → 失败原因（用于导出后提示）
 
   // 工具栏按钮引用
   private btnExportAll: HTMLElement | null = null;
   private btnExportSelected: HTMLElement | null = null;
   private btnSelectAll: HTMLElement | null = null;
+  private btnSave: HTMLElement | null = null;
   private labelCount: HTMLElement | null = null;
+  private _saveFeedbackTimer: number | null = null;
 
   constructor(callbacks: PDFExporterCallbacks) {
     this.callbacks = callbacks;
@@ -221,10 +237,19 @@ export class PDFExporter {
           color: #c0c0d0; border: 1px solid rgba(255,255,255,0.15);
         }
         .ml-pdf-btn-select-all:hover { background: rgba(255,255,255,0.18); }
+        .ml-pdf-btn-save {
+          background: rgba(76,175,80,0.18);
+          color: #66d97a; border: 1px solid rgba(76,175,80,0.35);
+          margin-left: auto;
+        }
+        .ml-pdf-btn-save:hover { background: rgba(76,175,80,0.3); }
+        .ml-pdf-btn-save.ml-saved {
+          background: rgba(76,175,80,0.45);
+          color: #fff;
+        }
         .ml-pdf-btn-exit {
           background: rgba(255,80,80,0.15);
           color: #ff6666; border: 1px solid rgba(255,80,80,0.3);
-          margin-left: auto;
         }
         .ml-pdf-btn-exit:hover { background: rgba(255,80,80,0.25); }
         .ml-pdf-info {
@@ -239,6 +264,7 @@ export class PDFExporter {
       </button>
       <button class="ml-pdf-btn ml-pdf-btn-select-all" id="ml-pdf-btn-select-all">⬜ 取消全选</button>
       <span class="ml-pdf-info" id="ml-pdf-toolbar-info">已翻译: 0 | 已选中: 0</span>
+      <button class="ml-pdf-btn ml-pdf-btn-save" id="ml-pdf-btn-save">💾 保存</button>
       <button class="ml-pdf-btn ml-pdf-btn-exit" id="ml-pdf-btn-exit">❌ 退出</button>
     `;
 
@@ -254,9 +280,59 @@ export class PDFExporter {
     this.btnExportAll?.addEventListener('click', () => this.exportAll());
     this.btnExportSelected?.addEventListener('click', () => this.exportSelected());
     this.btnSelectAll?.addEventListener('click', () => this.toggleSelectAll());
+    this.btnSave = toolbar.querySelector('#ml-pdf-btn-save');
+    this.btnSave?.addEventListener('click', () => this.handleSaveClick());
     toolbar.querySelector('#ml-pdf-btn-exit')?.addEventListener('click', () => this.callbacks.onExitRequest());
 
     this.updateToolbarCounts();
+  }
+
+  /**
+   * 处理「💾 保存」按钮点击
+   *
+   * 逻辑：先退出当前正在编辑的覆盖层（确保其文字/尺寸变更被收敛并触发一次保存回调），
+   * 再强制执行一次完整持久化，最后给出视觉反馈。整个过程中不退出 PDF 编辑模式。
+   */
+  private async handleSaveClick(): Promise<void> {
+    if (!this.btnSave) return;
+    const btn = this.btnSave;
+
+    // 若当前有覆盖层处于编辑态，先收敛它（与点"确认"按钮一致的行为）
+    if (this.editingOverlay) {
+      this.callbacks.onSaveEdits('', []);
+      this.clearEditingState();
+    }
+
+    try {
+      // 强制保存（不受 dirty 标志限制）
+      if (this.callbacks.onSaveRequest) {
+        await this.callbacks.onSaveRequest();
+      } else {
+        await this.callbacks.onAutoSave();
+      }
+
+      // 视觉反馈：短暂显示"已保存"
+      btn.classList.add('ml-saved');
+      btn.textContent = '✅ 已保存';
+      if (this._saveFeedbackTimer !== null) {
+        window.clearTimeout(this._saveFeedbackTimer);
+      }
+      this._saveFeedbackTimer = window.setTimeout(() => {
+        btn.classList.remove('ml-saved');
+        btn.textContent = '💾 保存';
+        this._saveFeedbackTimer = null;
+      }, 1500);
+    } catch (e) {
+      console.error('[PDFExport] 保存失败:', e);
+      btn.textContent = '⚠️ 保存失败';
+      if (this._saveFeedbackTimer !== null) {
+        window.clearTimeout(this._saveFeedbackTimer);
+      }
+      this._saveFeedbackTimer = window.setTimeout(() => {
+        btn.textContent = '💾 保存';
+        this._saveFeedbackTimer = null;
+      }, 2000);
+    }
   }
 
   private removeToolbar(): void {
@@ -701,6 +777,11 @@ export class PDFExporter {
     overlay.contentEditable = 'true';
     overlay.setAttribute('contenteditable', 'true');
 
+    // 🔧 文字编辑统一：拦截富文本粘贴 + 规范化内联样式，
+    //    避免从不同字号的覆盖层复制时，源样式污染当前文本框（出现两种字号）
+    overlay.addEventListener('paste', this._onOverlayPaste);
+    overlay.addEventListener('input', this._onOverlayInput);
+
     // 可拖拽
     overlay.addEventListener('mousedown', this._onDragStart);
 
@@ -709,6 +790,68 @@ export class PDFExporter {
 
     // 添加编辑工具栏
     this.addEditToolbar(overlay);
+  }
+
+  /**
+   * 拦截粘贴：强制纯文本，剥离源元素的字号/颜色/加粗等富文本样式
+   *
+   * 背景：浏览器默认粘贴会原样插入剪贴板中的 text/html，
+   * 从中等字号文本框复制到小字号文本框时，会带入源内联 font-size，
+   * 导致同一个文本框内出现多种字号。
+   */
+  private _onOverlayPaste = (e: ClipboardEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    const text = e.clipboardData?.getData('text/plain') ?? '';
+    if (!text) return;
+
+    // 插入纯文本，字号由当前 overlay 自身样式决定，从而保持整框统一
+    const ok = document.execCommand('insertText', false, text);
+    if (!ok) {
+      // 兜底：execCommand 不可用时手工插入文本节点
+      const sel = window.getSelection();
+      if (sel && sel.rangeCount > 0) {
+        const range = sel.getRangeAt(0);
+        range.deleteContents();
+        range.insertNode(document.createTextNode(text));
+        range.collapse(false);
+      }
+    }
+
+    this.normalizeOverlayContent(e.currentTarget as HTMLElement);
+    this.callbacks.onSaveEdits('', []);
+  };
+
+  /** 文字内容变更：规范化样式并标记为已修改 */
+  private _onOverlayInput = (e: Event) => {
+    this.normalizeOverlayContent(e.currentTarget as HTMLElement);
+    this.callbacks.onSaveEdits('', []);
+  };
+
+  /**
+   * 规范化覆盖层内容：移除所有富文本标记，只保留纯文本与换行
+   *
+   * 无论文字来自粘贴、拖拽还是浏览器默认行为，最终都收敛为
+   * 「纯文本节点 + <br> 换行」，保证整个文本框字号结构统一。
+   */
+  private normalizeOverlayContent(overlay: HTMLElement): void {
+    // 已经是纯文本（无元素子节点）则无需处理
+    const hasElementChild = Array.from(overlay.childNodes).some(
+      (n) => n.nodeType === Node.ELEMENT_NODE && (n as HTMLElement).tagName !== 'BR'
+    );
+    if (!hasElementChild) return;
+
+    // innerText 会依据实际排版保留换行，用它还原纯文本
+    const plain = overlay.innerText.replace(/\r\n/g, '\n');
+
+    // 清空并重建（保留 <br> 表示换行）
+    while (overlay.firstChild) overlay.removeChild(overlay.firstChild);
+    const lines = plain.split('\n');
+    lines.forEach((line, i) => {
+      if (i > 0) overlay.appendChild(document.createElement('br'));
+      if (line) overlay.appendChild(document.createTextNode(line));
+    });
   }
 
   /** 退出单个覆盖层编辑态 */
@@ -721,6 +864,8 @@ export class PDFExporter {
     this.editingOverlay.contentEditable = 'false';
     this.editingOverlay.removeAttribute('contenteditable');
     this.editingOverlay.removeEventListener('mousedown', this._onDragStart);
+    this.editingOverlay.removeEventListener('paste', this._onOverlayPaste);
+    this.editingOverlay.removeEventListener('input', this._onOverlayInput);
 
     // 🔧 恢复父容器的 overflow（编辑态时临时设置为 visible）
     const container = this.editingOverlay.parentElement;
@@ -819,8 +964,11 @@ export class PDFExporter {
   };
 
   private _onDragEnd = () => {
+    const dragged = this.editingOverlay;
     this.dragInfo = null;
     this.callbacks.onSaveEdits('', []);
+    // 🔧 用户已手动调整位置 → 撤下溢出提示
+    if (dragged) this.callbacks.onOverlayGeometryChange?.(dragged);
     document.removeEventListener('mousemove', this._onDragMove);
     document.removeEventListener('mouseup', this._onDragEnd);
   };
@@ -908,6 +1056,8 @@ export class PDFExporter {
     const onUp = () => {
       this.resizeInfo = null;
       this.callbacks.onSaveEdits('', []);
+      // 🔧 用户已手动调整尺寸 → 撤下溢出提示
+      this.callbacks.onOverlayGeometryChange?.(overlay);
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mouseup', onUp);
     };
@@ -1254,6 +1404,8 @@ export class PDFExporter {
 
     // ── 阶段一：逐块生成 jsPDF，收集 ArrayBuffer ──
     const chunkBuffers: ArrayBuffer[] = [];
+    // 记录导出失败的页，导出结束后如实告知用户（而非静默产生空白页）
+    const failedPages: Array<{ index: number; src: string; reason: string }> = [];
 
     for (let chunk = 0; chunk < totalChunks; chunk++) {
       const start = chunk * CHUNK_SIZE;
@@ -1305,6 +1457,12 @@ export class PDFExporter {
             }
           } catch (fallbackError) {
             console.error(`[PDFExport] 降级方案也失败:`, fallbackError);
+            // 记录失败页，最终统一提示用户
+            const reason =
+              compositeError instanceof Error
+                ? compositeError.message
+                : String(compositeError);
+            failedPages.push({ index: globalIndex + 1, src: target.imageSrc, reason });
           }
         }
       }
@@ -1364,10 +1522,35 @@ export class PDFExporter {
 
     // 清理
     this.imageDataUrlCache.clear();
+    this.failedImages.clear();
     this.restoreUIAfterScreenshot();
     this.removeProgressBar();
 
     console.log(`[PDFExport] 🎉 PDF生成完成: ${targets.length}张图片`);
+
+    // 🔧 如实告知失败页：此前失败仅写 console 静默跳过，用户只看到"空白页"不知原因
+    if (failedPages.length > 0) {
+      const shown = failedPages.slice(0, 8);
+      const lines = shown.map(
+        (f, i) => `${i + 1}. 第 ${f.index} 张：${this.shortenUrl(f.src)}\n   原因：${f.reason}`
+      );
+      const more = failedPages.length > shown.length
+        ? `\n… 另有 ${failedPages.length - shown.length} 张同样失败`
+        : '';
+      alert(
+        `⚠️ 导出完成，但有 ${failedPages.length} 张图片未能写入 PDF：\n\n` +
+        lines.join('\n') +
+        more +
+        '\n\n提示：本地文件(file://)或无法访问的图片请改用 http(s) 页面；' +
+        '也可在页面中先截图再导出。'
+      );
+    }
+  }
+
+  /** 缩短 URL 便于在提示中展示 */
+  private shortenUrl(url: string): string {
+    if (url.startsWith('data:')) return '内嵌 data URL';
+    return url.length > 60 ? `${url.substring(0, 60)}…` : url;
   }
 
   /** 通过 background service worker 预拉取跨域图片为 data URL（仅填缓存，不改 DOM img.src） */
@@ -1379,12 +1562,33 @@ export class PDFExporter {
     // 并行拉取所有图片
     const results = await Promise.allSettled(
       uniqueUrls.map(async (url) => {
-        // 已经是 data URL 或同源的跳过
-        if (url.startsWith('data:') || this.isSameOrigin(url)) {
+        // 1. 已经是 data URL：直接复用
+        if (url.startsWith('data:')) {
           this.imageDataUrlCache.set(url, url);
           return;
         }
 
+        // 2. blob: URL：只能在创建它的文档上下文中访问，background 必然失败，
+        //    因此在本文档内 fetch 后转为 dataURL（拖入浏览器的图片常为此类）
+        if (url.startsWith('blob:')) {
+          const dataUrl = await this.blobUrlToDataUrl(url);
+          this.imageDataUrlCache.set(url, dataUrl);
+          return;
+        }
+
+        // 3. file: URL：扩展 service worker 无法 fetch 本地文件，直接报明确错误
+        if (url.startsWith('file:')) {
+          throw new Error('本地文件图片（file://）无法读取，无法导出到 PDF');
+        }
+
+        // 4. 同源图片：本可直接使用，但为规避 canvas 污染风险统一转为 dataURL
+        if (this.isSameOrigin(url)) {
+          const dataUrl = await this.fetchUrlToDataUrl(url);
+          this.imageDataUrlCache.set(url, dataUrl);
+          return;
+        }
+
+        // 5. 跨域图片：交给 background（不受页面 CORS 限制）
         return new Promise<void>((resolve, reject) => {
           chrome.runtime.sendMessage(
             { target: 'background', type: 'FETCH_IMAGE_DATA_URL', imageUrl: url },
@@ -1408,16 +1612,56 @@ export class PDFExporter {
     const successCount = results.filter(r => r.status === 'fulfilled').length;
     const failCount = results.filter(r => r.status === 'rejected').length;
     console.log(`[PDFExport] 📥 图片预拉取: ${successCount} 成功, ${failCount} 失败 (共 ${uniqueUrls.length} 张)`);
+
+    // 记录失败原因，供导出后向用户明确提示（而非静默产生空白页）
+    this.failedImages.clear();
+    results.forEach((r, i) => {
+      if (r.status === 'rejected') {
+        const reason = r.reason instanceof Error ? r.reason.message : String(r.reason);
+        this.failedImages.set(uniqueUrls[i], reason);
+        console.warn(`[PDFExport] ⚠️ 图片拉取失败: ${uniqueUrls[i].substring(0, 80)} → ${reason}`);
+      }
+    });
   }
 
   /** 判断 URL 是否与当前页面同源 */
   private isSameOrigin(url: string): boolean {
+    // blob:/file: 即使 origin 字面相同也不能直接当作 dataURL 使用：
+    // - blob: 仅在创建它的文档内有效
+    // - file: 在 Chrome 中通常被视为跨源，画入 canvas 会导致污染
+    if (url.startsWith('blob:') || url.startsWith('file:')) return false;
     try {
       const u = new URL(url);
       return u.origin === window.location.origin;
     } catch {
       return false;
     }
+  }
+
+  /** 将 Blob 转为 dataURL */
+  private blobToDataUrl(blob: Blob): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = () => reject(new Error('Blob 转 dataURL 失败'));
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  /** 在当前文档上下文中拉取 blob: URL 并转为 dataURL */
+  private async blobUrlToDataUrl(blobUrl: string): Promise<string> {
+    const resp = await fetch(blobUrl);
+    if (!resp.ok) throw new Error(`blob 读取失败 (HTTP ${resp.status})`);
+    const blob = await resp.blob();
+    return await this.blobToDataUrl(blob);
+  }
+
+  /** 拉取同源 URL 并转为 dataURL（规避 canvas 污染） */
+  private async fetchUrlToDataUrl(url: string): Promise<string> {
+    const resp = await fetch(url, { credentials: 'same-origin' });
+    if (!resp.ok) throw new Error(`图片读取失败 (HTTP ${resp.status})`);
+    const blob = await resp.blob();
+    return await this.blobToDataUrl(blob);
   }
 
   /** 从 data URL 加载 Image 对象 */
@@ -1441,7 +1685,15 @@ export class PDFExporter {
    */
   private async compositeImageWithOverlays(target: ExportTarget): Promise<HTMLCanvasElement> {
     const dataUrl = this.imageDataUrlCache.get(target.imageSrc);
-    if (!dataUrl) throw new Error('无缓存 data URL');
+    if (!dataUrl) {
+      // 区分「预拉取时已失败」与「压根没有记录」，让报错信息足够定位问题
+      const reason = this.failedImages.get(target.imageSrc);
+      throw new Error(
+        reason
+          ? `图片预拉取失败: ${reason}`
+          : '无缓存 data URL（图片未被预拉取）'
+      );
+    }
 
     // 1. 加载原图
     const img = await this.loadImageFromDataUrl(dataUrl);
@@ -1460,6 +1712,16 @@ export class PDFExporter {
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(img, 0, 0);
 
+    // 3.5 主动探测画布污染：若图片跨源，toDataURL 会抛 SecurityError。
+    //     提前探测可给出明确错误，而不是在生成 PDF 时才失败（表现为空白页）。
+    try {
+      canvas.toDataURL('image/png');
+    } catch {
+      throw new Error(
+        '图片跨源污染画布，无法导出（请尝试在 http(s) 页面中打开该图片）'
+      );
+    }
+
     // 4. 获取覆盖层数据
     const overlays = this.callbacks.getOverlaysForImage(target.imageElement);
     if (overlays.length === 0) {
@@ -1473,7 +1735,10 @@ export class PDFExporter {
 
     // 6. 逐个绘制覆盖层文字到 canvas
     for (const overlay of overlays) {
-      const text = overlay.textContent?.trim();
+      // 🔧 优先使用渲染时记录的纯译文：overlay.textContent 会包含
+      //    溢出提示角标（⤢）等子元素文字，直接使用会污染导出内容。
+      const plain = overlay.dataset.mlPlainText;
+      const text = (plain !== undefined ? plain : overlay.textContent || '').trim();
       if (!text) continue;
 
       const overlayRect = overlay.getBoundingClientRect();
