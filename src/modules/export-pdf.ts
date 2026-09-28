@@ -166,9 +166,10 @@ export class PDFExporter {
     // 2. 为所有已翻译图片创建选择框（默认全选）
     this.refreshCheckboxes();
 
-    // 3. 页面顶部偏移（防止工具栏遮挡内容）
-    document.documentElement.style.scrollPaddingTop = '60px';
-    document.body.style.paddingTop = '60px';
+    // 3. (已移除) 原先在这里给 body 加 paddingTop=60px 防止工具栏遮挡内容，
+    //    但这会让图片和覆盖层在几何上产生 ~58px 的位移错位（图片被推两次，
+    //    覆盖层只被推一次）。工具栏是 position:fixed 自然浮顶，不改布局即可。
+    //    见 2026-09-28 调试结论。
 
     console.log('[PDFExport] ✅ 进入PDF导出模式, 保存目录:', savePath || '(默认)');
   }
@@ -189,9 +190,9 @@ export class PDFExporter {
     // 移除进度条
     this.removeProgressBar();
 
-    // 恢复页面偏移
-    document.documentElement.style.scrollPaddingTop = '';
-    document.body.style.paddingTop = '';
+    // (已移除) 不再需要在退出时恢复 body.paddingTop / scrollPaddingTop，
+    //    进入 PDF 模式时不再写入它们 —— 见 enterPdfMode 的注释。
+    //    这里保留为空操作以保持原有步骤序号稳定。
 
     // 🔧 先禁用所有覆盖层的编辑模式（解除 dblclick/拖拽/hover 等事件），
     //    再清理当前活跃编辑覆盖层。之前只调 clearEditingState 导致非活跃
