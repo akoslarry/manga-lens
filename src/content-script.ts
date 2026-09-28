@@ -18,6 +18,7 @@ import { DialogMerger, type OCRTextItem, type MergedDialog } from './modules/dia
 import { BatchTranslator } from './modules/batch-translator';
 import { translationCache } from './modules/translation-cache';
 import { pdfExporter } from './modules/export-pdf';
+import { psdExporter, setOverlayGeometry } from './modules/export-psd';
 
 // State management
 interface MangaLensState {
@@ -77,6 +78,33 @@ let activeTranslations = 0;
 let maxImagesPerBatch = 30; // 默认单次翻译上限
 let translationCompletedCount = 0; // 本次已翻译图片计数
 let isTranslationPaused = false; // 是否因达到上限而暂停
+let hasShownLimitPopup = false; // 上限提示弹窗是否已展示（避免飞行任务完成后反复弹窗）
+
+/**
+ * 准入闸门：判断是否还能启动新的翻译任务
+ *
+ * 判断口径 = 已完成数 + 在途数（已启动未完成）。
+ * 关键点：该判断必须在任务「启动前」执行，否则一个 API 往返窗口内
+ * 会持续启动新任务，导致最终计数远超上限（表现为"设 30 却翻译到 30+"）。
+ */
+function canStartMoreTranslations(): boolean {
+  return translationCompletedCount + activeTranslations < maxImagesPerBatch;
+}
+
+/**
+ * OCR 层软限制：避免已 OCR 完毕、等待翻译的任务堆积过多
+ *
+ * 口径在原基础上额外计入「翻译队列中待处理数」，让 OCR 更早停下，
+ * 减少无谓的 OCR 调用（OCR 与翻译的并发度差异很大：9 vs 近乎无限）。
+ */
+function canStartMoreOCR(): boolean {
+  return (
+    translationCompletedCount +
+      activeTranslations +
+      translationQueue.length <
+    maxImagesPerBatch
+  );
+}
 
 /**
  * Process next OCR task
@@ -88,6 +116,16 @@ async function processNextOCR(): Promise<void> {
   }
 
   if (ocrQueue.length === 0 || activeOCRs >= OCR_CONCURRENCY) {
+    return;
+  }
+
+  // 🔧 OCR 层软限制：翻译队列已积压到上限时先停 OCR，待翻译消化后再继续。
+  //    此处不置 isTranslationPaused，以免影响飞行中的翻译任务正常完成；
+  //    暂停标志由翻译层的硬上限判断负责设置。
+  if (!canStartMoreOCR()) {
+    console.log(
+      `[MangaLens] OCR 暂停启动（已完成 ${translationCompletedCount} + 在途 ${activeTranslations} + 待翻译 ${translationQueue.length} ≥ 上限 ${maxImagesPerBatch}）`
+    );
     return;
   }
 
@@ -146,6 +184,24 @@ async function processNextTranslation(): Promise<void> {
     return;
   }
 
+  // 🔧 准入闸门（核心修复）：在「启动前」判断是否已达上限。
+  //    口径 = 已完成 + 在途 ≥ 上限。
+  //    必须先于 shift 执行，否则一个 API 往返窗口内会持续启动新任务，
+  //    导致最终计数超出上限（表现为"设 30 却翻译到 30+"）。
+  if (!canStartMoreTranslations()) {
+    isTranslationPaused = true;
+    console.log(
+      `[MangaLens] ⚠️ 已达到单次翻译上限 (${maxImagesPerBatch} 张)，暂停启动新任务` +
+      `（已完成 ${translationCompletedCount}，在途 ${activeTranslations}，待翻译 ${translationQueue.length}）`
+    );
+    // 弹窗只展示一次，避免飞行任务逐个完成时反复弹出
+    if (!hasShownLimitPopup) {
+      hasShownLimitPopup = true;
+      showBatchLimitPopup();
+    }
+    return;
+  }
+
   const task = translationQueue.shift();
   if (!task) return;
 
@@ -157,21 +213,20 @@ async function processNextTranslation(): Promise<void> {
     await translateAndRender(task.image, task.ocrResult);
     task.resolve();
 
-    // 翻译完成计数 +1，检查是否达到单次上限
+    // 翻译完成计数 +1
     translationCompletedCount++;
-    console.log(`[MangaLens] 翻译完成计数: ${translationCompletedCount}/${maxImagesPerBatch}`);
-
-    if (translationCompletedCount >= maxImagesPerBatch) {
-      isTranslationPaused = true;
-      console.log(`[MangaLens] ⚠️ 已达到单次翻译上限 (${maxImagesPerBatch}张)，暂停处理`);
-      showBatchLimitPopup();
-    }
+    console.log(
+      `[MangaLens] 翻译完成计数: ${translationCompletedCount}/${maxImagesPerBatch}` +
+      `（在途 ${activeTranslations - 1}，待翻译 ${translationQueue.length}）`
+    );
   } catch (error) {
     task.reject(error instanceof Error ? error : new Error(String(error)));
   } finally {
     activeTranslations--;
-    // Continue processing next translation
+    // 继续调度：下一轮会在准入闸门处判断是否已达上限
     processNextTranslation();
+    // 🔧 翻译消化后，OCR 层可能已解除软限制，重新点火 OCR
+    processNextOCR();
   }
 }
 
@@ -675,7 +730,11 @@ function showBatchLimitPopup(): void {
       .mml-btn-pause:hover { background: rgba(255,255,255,0.14); }
     </style>
     <div class="mml-title">📊 已达到单次翻译上限</div>
-    <div class="mml-desc">已翻译 <strong style="color:#667eea">${translationCompletedCount}</strong> 张图片（上限 ${maxImagesPerBatch} 张）。是否继续识别？</div>
+    <div class="mml-desc">已翻译 <strong style="color:#667eea">${translationCompletedCount}</strong> 张图片（上限 ${maxImagesPerBatch} 张）${
+      activeTranslations > 0
+        ? `，另有 <strong style="color:#f0a500">${activeTranslations}</strong> 张正在收尾`
+        : ''
+    }。是否继续识别？</div>
     <div class="mml-buttons">
       <button class="mml-btn mml-btn-continue" id="mml-btn-continue">✅ 是，继续翻译</button>
       <button class="mml-btn mml-btn-pause" id="mml-btn-pause">⏸️ 否，暂停翻译</button>
@@ -700,6 +759,7 @@ function showBatchLimitPopup(): void {
 function resumeTranslation(): void {
   translationCompletedCount = 0;
   isTranslationPaused = false;
+  hasShownLimitPopup = false;
   console.log('[MangaLens] ✅ 翻译已恢复，计数已清零');
   // 恢复 OCR 和翻译队列处理
   processNextOCR();
@@ -890,7 +950,9 @@ async function initialize(): Promise<void> {
 
     // 2. Load configuration from storage
     console.log('[MangaLens] Step 2/3: Loading configuration...');
-    const stored = await chrome.storage.local.get(['apiKey', 'apiSecret', 'deepseekApiKey', 'isEnabled']);
+    const stored = await chrome.storage.local.get([
+      'apiKey', 'apiSecret', 'deepseekApiKey', 'isEnabled', 'mangaLensBatchLimit'
+    ]);
     if (stored.apiKey || stored.deepseekApiKey || process.env.DEEPSEEK_API_KEY) {
       state.apiKey = stored.apiKey || '';
       state.apiSecret = stored.apiSecret || '';
@@ -905,6 +967,17 @@ async function initialize(): Promise<void> {
       console.log('[MangaLens] ⚠️ API key not configured, please configure in settings');
     }
     state.isEnabled = stored.isEnabled !== false;
+
+    // 2.5 加载已保存的单次翻译上限
+    //     🔧 修复：此前该值始终以硬编码 30 启动，只有打开 popup 保存时才会更新，
+    //        导致刷新页面后用户设置的上限会静默失效。
+    if (stored.mangaLensBatchLimit !== undefined) {
+      const savedLimit = Number(stored.mangaLensBatchLimit);
+      if (Number.isFinite(savedLimit) && savedLimit >= 1) {
+        maxImagesPerBatch = Math.max(1, Math.min(100, savedLimit));
+        console.log(`[MangaLens] ✓ 单次翻译上限已加载: ${maxImagesPerBatch} 张`);
+      }
+    }
 
     // 3. 加载已保存的字体大小设置
     await overlayManager.loadSavedFontSize();
@@ -934,6 +1007,50 @@ async function initialize(): Promise<void> {
         // 🔧 用户手动调整尺寸/位置后，直接撤下溢出提示
         //    人工调整即为已知意图，不做复检（否则故意缩小时标记永远无法消除）
         overlayManager.handleManualGeometryChange(overlay);
+      },
+      onExportPsd: async (selectedOnly: boolean) => {
+        // 🔧 只导出「当前页面已翻译的图片」，不含缓存里的历史条目
+        const selected = selectedOnly
+          ? pdfExporter.getSelectedImageSrcs()
+          : undefined;
+        await psdExporter.exportAll(selected);
+      }
+    });
+
+    // 4.55 配置 psdExporter 回调
+    psdExporter.configure({
+      getTranslatedImages: () => overlayManager.getAllTranslatedImages(),
+      getCachedDialogsForImage: async (imageSrc: string) =>
+        await translationCache.get(imageSrc),
+      /**
+       * 采集覆盖层的「实测几何」并注入 PSD 导出器
+       *
+       * PSD 导出需要的是「图片自然坐标」，而 customStyle 里存的是
+       * 以覆盖层容器为基准的 CSS 百分比（left/top 还含图片偏移），
+       * 两者基准不一致。这里直接读取覆盖层在页面上的实际像素矩形，
+       * 按图片显示矩形换算回自然坐标，结果与页面所见完全一致。
+       */
+      prepareGeometry: (imageElement: HTMLImageElement) => {
+        const geo = overlayManager.collectOverlayGeometry(imageElement);
+        setOverlayGeometry(geo);
+        console.log(
+          `[PSDExport] 已采集 ${geo.size} 个覆盖层的实测几何 ` +
+            `(图片 ${imageElement.naturalWidth}x${imageElement.naturalHeight})`
+        );
+      },
+      downloadPsd: (blob: Blob, filename: string) => {
+        // 复用已有的 PDF 下载通道（background 接受任意 URL + 文件名）
+        const blobUrl = URL.createObjectURL(blob);
+        chrome.runtime.sendMessage({
+          target: 'background',
+          type: 'DOWNLOAD_PDF',
+          url: blobUrl,
+          filename,
+          saveAs: false
+        });
+      },
+      onProgress: (current: number, total: number, label: string) => {
+        console.log(`[PSDExport] ${label}`);
       }
     });
 
@@ -1405,6 +1522,7 @@ chrome.runtime.onMessage.addListener(async (message, sender, sendResponse) => {
       translationQueue.length = 0; // Clear translation queue
       isTranslationPaused = false; // Reset pause flag
       translationCompletedCount = 0; // Reset batch counter
+      hasShownLimitPopup = false; // Reset popup flag
       overlayManager.removeAllOverlays();
       processAllImages();
       sendResponse({ success: true });

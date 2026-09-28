@@ -25,6 +25,9 @@ export interface TranslationOverlay {
   element: HTMLElement;
 }
 
+/** 采集覆盖层几何时的最小尺寸（自然坐标），避免退化矩形导致 PSD 图层异常 */
+const MIN_GEOMETRY_SIZE = 8;
+
 export interface RenderConfig {
   /** 译文是否横排（原文通常是竖排） */
   horizontalText: boolean;
@@ -1395,6 +1398,129 @@ export class TranslationOverlayManager {
   /** 获取指定图片的覆盖层容器元素 */
   getContainerForImage(imageElement: HTMLImageElement): HTMLElement | undefined {
     return this.containers.get(imageElement);
+  }
+
+  /**
+   * 采集指定图片上所有覆盖层的「图片自然坐标」几何数据
+   *
+   * 为什么需要它：
+   *   customStyle 里存的是 overlay 的 CSS 百分比，其基准是**覆盖层容器**
+   *   而非图片，且容器尺寸通常远大于图片（实测可达 3.3 倍）。
+   *   直接用这些百分比乘图片自然尺寸，会把缩放系数一并算进去，
+   *   导致导出的底衬/文本框整体放大（严重时铺满画布）。
+   *
+   *   因此本方法按「container 尺寸 → 图片布局尺寸 → 图片自然尺寸」
+   *   三级换算，显式扣除容器缩放与图片偏移，得到与页面所见一致的几何。
+   *
+   * @returns Map<dialogId, 自然坐标几何>
+   */
+  collectOverlayGeometry(
+    imageElement: HTMLImageElement
+  ): Map<number, { left: number; top: number; width: number; height: number; fontSize: number }> {
+    const result = new Map<
+      number,
+      { left: number; top: number; width: number; height: number; fontSize: number }
+    >();
+
+    const container = this.containers.get(imageElement);
+    if (!container) return result;
+
+    const naturalWidth = imageElement.naturalWidth || imageElement.width;
+    const naturalHeight = imageElement.naturalHeight || imageElement.height;
+    if (!naturalWidth || !naturalHeight) return result;
+
+    /**
+     * ⚠️ 换算基准
+     *
+     * 覆盖层的 left/top/width/height 是**百分比**，按 CSS 规范相对
+     * container 的**尺寸**解析。而 container 通过 width:100%;height:100%
+     * 铺满 parent，其尺寸通常 ≠ 图片尺寸（实测 container 可比图片宽 3.3 倍，
+     * 这正是此前底衬被撑大的直接原因）。
+     *
+     * 因此换算必须分两步：
+     *   ① 百分比 × container 尺寸 → 得到「container 坐标系」的布局像素
+     *   ② 再按 (图片自然尺寸 / 图片在 container 中的布局尺寸) 换算到自然坐标
+     *
+     * 步骤 ② 的关键是「图片在 container 中的布局尺寸」，用图片自身的
+     * clientWidth（布局宽，不受 transform 影响）即可。
+     */
+    const containerWidth = container.clientWidth || container.offsetWidth;
+    const containerHeight = container.clientHeight || container.offsetHeight;
+    if (!containerWidth || !containerHeight) return result;
+
+    // 图片的布局尺寸（布局坐标，非视觉变换后的尺寸）
+    const imgLayoutWidth = imageElement.clientWidth || imageElement.offsetWidth;
+    const imgLayoutHeight = imageElement.clientHeight || imageElement.offsetHeight;
+    if (!imgLayoutWidth || !imgLayoutHeight) return result;
+
+    // 布局像素 → 自然像素 的比例
+    const naturalPerLayoutX = naturalWidth / imgLayoutWidth;
+    const naturalPerLayoutY = naturalHeight / imgLayoutHeight;
+
+    // 图片左上角在 container 布局坐标系中的位置
+    // （container 与 img 同为 parent 的子元素，用 rect 差值最直观；
+    //   若图片处于 transform 空间，两者 rect 同步缩放，差值仍然有效）
+    const imgRect = imageElement.getBoundingClientRect();
+    const containerRect = container.getBoundingClientRect();
+    // rect 差值处于「视觉坐标」，除以视觉/布局比得到布局坐标
+    const visualToLayoutX = containerWidth / (containerRect.width || containerWidth);
+    const visualToLayoutY = containerHeight / (containerRect.height || containerHeight);
+    const imgOffsetXLayout = (imgRect.left - containerRect.left) * visualToLayoutX;
+    const imgOffsetYLayout = (imgRect.top - containerRect.top) * visualToLayoutY;
+
+    this.overlays.forEach((overlay) => {
+      if (!container.contains(overlay.element)) return;
+
+      const el = overlay.element;
+      const dialogId = Number(el.dataset.dialogId);
+      if (!Number.isFinite(dialogId)) return;
+
+      // 解析覆盖层的百分比定位（CSS 规范：相对 container 尺寸）
+      const st = el.style;
+      const pct = (v: string | undefined): number => {
+        if (!v) return NaN;
+        const n = parseFloat(v);
+        return Number.isFinite(n) ? n : NaN;
+      };
+
+      const pctLeft = pct(st.left);
+      const pctTop = pct(st.top);
+      const pctWidth = pct(st.width);
+      const pctHeight = pct(st.height);
+
+      // 位置用 left/top，尺寸用 width/height；任一缺失则跳过
+      if (![pctLeft, pctTop, pctWidth, pctHeight].every(Number.isFinite)) return;
+
+      // ① container 坐标系下的布局像素
+      const layoutLeft = (pctLeft / 100) * containerWidth;
+      const layoutTop = (pctTop / 100) * containerHeight;
+      const layoutWidth = (pctWidth / 100) * containerWidth;
+      const layoutHeight = (pctHeight / 100) * containerHeight;
+
+      // ② 相对图片左上角，并换算到自然坐标
+      const left = (layoutLeft - imgOffsetXLayout) * naturalPerLayoutX;
+      const top = (layoutTop - imgOffsetYLayout) * naturalPerLayoutY;
+      const width = layoutWidth * naturalPerLayoutX;
+      const height = layoutHeight * naturalPerLayoutY;
+
+      // 字号：CSS 字号是布局坐标下的值，按同一比例换算
+      const cssFontSize = parseFloat(getComputedStyle(el).fontSize);
+      const fontSize =
+        Number.isFinite(cssFontSize) && cssFontSize > 0
+          ? cssFontSize * naturalPerLayoutX
+          : 0;
+
+      // 后写入者覆盖前者（同一 dialogId 理论上只有一个覆盖层）
+      result.set(dialogId, {
+        left: Math.max(0, left),
+        top: Math.max(0, top),
+        width: Math.max(MIN_GEOMETRY_SIZE, width),
+        height: Math.max(MIN_GEOMETRY_SIZE, height),
+        fontSize,
+      });
+    });
+
+    return result;
   }
 
   /** 显示指定图片的"重新翻译"按钮 */

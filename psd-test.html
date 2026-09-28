@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>MangaLens PSD 竖排验证（最终版）</title>
+  <style>
+    body {
+      font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+      max-width: 900px; margin: 40px auto; padding: 0 20px;
+      background: #1a1a2e; color: #e0e0e0; line-height: 1.7;
+    }
+    h1 { font-size: 20px; color: #fff; }
+    h2 { font-size: 15px; margin-top: 26px; color: #9aa7ff; }
+    .card {
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 10px; padding: 16px 20px; margin: 16px 0;
+    }
+    .ok { background: rgba(80,220,140,0.10); border-color: rgba(80,220,140,0.35); }
+    label { display: block; font-size: 13px; margin: 10px 0 4px; color: #b8b8c8; }
+    input[type=text], input[type=number] {
+      background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2);
+      border-radius: 6px; color: #fff; padding: 7px 10px; font-size: 13px; width: 320px;
+    }
+    button {
+      background: linear-gradient(135deg, #667eea, #764ba2); border: none; color: #fff;
+      padding: 11px 22px; border-radius: 8px; font-size: 14px; cursor: pointer; margin-top: 14px;
+    }
+    button:hover { opacity: 0.9; }
+    #log {
+      background: #0d0d16; border-radius: 8px; padding: 12px 16px;
+      font-family: Consolas, monospace; font-size: 12px; white-space: pre-wrap;
+      max-height: 300px; overflow-y: auto; margin-top: 16px; color: #7fd97f;
+    }
+    ol { padding-left: 22px; } li { margin: 6px 0; font-size: 13px; }
+    code { background: rgba(255,255,255,0.1); padding: 1px 6px; border-radius: 4px; font-size: 12px; }
+    table { border-collapse: collapse; width: 100%; font-size: 12px; margin-top: 8px; }
+    th, td { border: 1px solid rgba(255,255,255,0.15); padding: 6px 9px; text-align: left; }
+    th { background: rgba(255,255,255,0.07); color: #9aa7ff; }
+  </style>
+</head>
+<body>
+  <h1>PSD 竖排验证 · 最终版</h1>
+  <p style="font-size:13px;color:#a0a0b0;">
+    结论：<b>ag-psd 原生输出即可满足全部需求，无需任何字节注入。</b>
+  </p>
+
+  <div class="card ok">
+    <h2>已验证通过（Adobe Photoshop 实测）</h2>
+    <table>
+      <tr><th>需求</th><th>结果</th></tr>
+      <tr><td>竖排显示（从上到下、从右到左）</td><td>✅ 正常</td></tr>
+      <tr><td>拖动文本框</td><td>✅ 支持</td></tr>
+      <tr><td>双击编辑文字</td><td>✅ 支持</td></tr>
+      <tr><td>调整文本框大小</td><td>✅ 支持</td></tr>
+    </table>
+    <p style="font-size:13px;margin-bottom:0;">
+      实现方式：<code>ag-psd</code> 的 <code>writePsd</code>，文字层设
+      <code>orientation: 'vertical'</code> + <code>shapeType: 'box'</code>。
+      它写出的 <code>Ornt=Vrtc</code> / <code>WritingDirection=2</code> /
+      <code>Procession=1</code> 与 Adobe 原生一致。
+    </p>
+  </div>
+
+  <div class="card">
+    <h2>排查结论（供后续参考）</h2>
+    <ol style="font-size:13px;">
+      <li>
+        <b>Photopea 与 Adobe PS 行为不同</b>：早前用 Photopea 保存的样本里出现
+        <code>_LineOrientation=2</code>，曾误判为 PS 官方竖排标记 ——
+        实为 Photopea 私有约定，Adobe PS 中根本不存在该字段。
+      </li>
+      <li>
+        <b>Adobe PS 的竖排编码</b>：<code>Ornt=Vrtc</code> + <code>WritingDirection=2</code>
+        + <code>Procession=1</code>，<code>ag-psd</code> 已全部正确写出。
+      </li>
+      <li>
+        <b>描述符 <code>TxMg</code>/<code>bounds</code>/<code>boundingBox</code> 非必需</b>：
+        Adobe 会写这三个字段，但缺失时 PS 仍能正常打开与竖排（实测通过）。
+        强行注入反而因字节未对齐导致图层损坏，故已放弃。
+      </li>
+      <li>
+        <b>验证环境很重要</b>：本轮排查中 Photopea 的差异一度误导方向，
+        后续 PSD 兼容性问题应在 Adobe PS 中验证。
+      </li>
+    </ol>
+  </div>
+
+  <div class="card">
+    <h2>测试参数</h2>
+    <label>字体名（PostScript 名）</label>
+    <input type="text" id="fontName" value="MicrosoftYaHei">
+    <label>画布尺寸</label>
+    <input type="number" id="canvasW" value="800" style="width:100px;"> ×
+    <input type="number" id="canvasH" value="900" style="width:100px;">
+  </div>
+
+  <div class="card">
+    <h2>生成的图层</h2>
+    <ol>
+      <li><b>竖排段落框</b> —— 中文竖排，可编辑、可调整大小</li>
+      <li><b>竖排日文</b> —— 验证日文标点避头尾</li>
+      <li><b>横排段落框</b> —— 对照</li>
+      <li><b>Background</b> —— 参考网格</li>
+    </ol>
+    <button id="btnGen">生成并下载 PSD</button>
+  </div>
+
+  <div id="log">等待生成...</div>
+
+  <script src="node_modules/ag-psd/dist/bundle.js"></script>
+  <script>
+    const logEl = document.getElementById('log');
+    function log(m) { logEl.textContent += '\n' + m; logEl.scrollTop = logEl.scrollHeight; }
+
+    document.getElementById('btnGen').addEventListener('click', () => {
+      try {
+        logEl.textContent = '开始生成...';
+        const agPsd = window.agPsd;
+        if (!agPsd || !agPsd.writePsd) { log('❌ 未加载 ag-psd'); return; }
+
+        const W = parseInt(document.getElementById('canvasW').value, 10) || 800;
+        const H = parseInt(document.getElementById('canvasH').value, 10) || 900;
+        const fontName = document.getElementById('fontName').value.trim() || 'MicrosoftYaHei';
+        log(`画布 ${W}×${H}，字体 ${fontName}`);
+
+        // 背景参考网格
+        const bgCanvas = document.createElement('canvas');
+        bgCanvas.width = W; bgCanvas.height = H;
+        const bgCtx = bgCanvas.getContext('2d');
+        bgCtx.fillStyle = '#f0f0f0';
+        bgCtx.fillRect(0, 0, W, H);
+        bgCtx.strokeStyle = '#d0d0d0';
+        bgCtx.lineWidth = 1;
+        for (let x = 0; x < W; x += 100) { bgCtx.beginPath(); bgCtx.moveTo(x, 0); bgCtx.lineTo(x, H); bgCtx.stroke(); }
+        for (let y = 0; y < H; y += 100) { bgCtx.beginPath(); bgCtx.moveTo(0, y); bgCtx.lineTo(W, y); bgCtx.stroke(); }
+
+        const st = { font: { name: fontName }, fontSize: 36, fillColor: { r: 0, g: 0, b: 0 } };
+
+        // 竖排框：窄而高（模拟真实竖排气泡）
+        const mk = (name, orient, text, box) => ({
+          name,
+          text: {
+            text,
+            orientation: orient,
+            shapeType: 'box',
+            top: box[0], left: box[1], bottom: box[2], right: box[3],
+            boxBounds: [0, 0, box[3] - box[1], box[2] - box[0]],
+            style: st,
+            paragraphStyle: { justification: 'center' },
+          },
+        });
+
+        const children = [
+          mk('竖排中文', 'vertical', '这是竖排文本测试', [60, 100, 640, 200]),
+          mk('竖排日文', 'vertical', 'こんにちは、世界！', [60, 300, 640, 400]),
+          mk('横排对照', 'horizontal', '这是横排文本测试', [700, 100, 800, 500]),
+          { name: 'Background', canvas: bgCanvas },
+        ];
+
+        children.slice(0, 3).forEach(c => log(`✓ 构建「${c.name}」（${c.text.orientation}）`));
+
+        log('\n写入 PSD...');
+        const buffer = agPsd.writePsd({ width: W, height: H, children });
+        log(`✓ 完成，${buffer.byteLength} 字节`);
+
+        const blob = new Blob([buffer], { type: 'application/octet-stream' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'mangalens-psd-vertical.psd';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(a.href);
+
+        log('\n🎉 已下载 mangalens-psd-vertical.psd');
+        log('请用 Adobe Photoshop 打开验证（不要用 Photopea）。');
+      } catch (e) {
+        log('❌ 生成失败: ' + (e && e.message ? e.message : String(e)));
+        console.error(e);
+      }
+    });
+  </script>
+</body>
+</html>

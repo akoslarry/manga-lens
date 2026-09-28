@@ -35,6 +35,11 @@ coverage/
 *.tmp
 .cache/
 
+# PSD 调试产物（本地排查用，不入库）
+*.psd
+psd-*.mjs
+psd-*.txt
+
 # Python
 __pycache__/
 *.pyc

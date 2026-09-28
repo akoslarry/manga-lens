@@ -39,6 +39,13 @@ export interface PDFExporterCallbacks {
   /** 静默自动保存（导出PDF前触发，无需用户确认） */
   onAutoSave: () => Promise<void>;
   /**
+   * 导出 PSD（当前页面已翻译图片 → 可编辑文字层的 PSD）
+   *
+   * 传入 selectedOnly=true 时仅导出用户勾选的图片，否则导出全部。
+   * 由 content-script 注入具体实现，避免本模块直接依赖 PSD 导出细节。
+   */
+  onExportPsd?: (selectedOnly: boolean) => Promise<void>;
+  /**
    * 用户点击工具栏「💾 保存」按钮
    *
    * 要求：强制持久化当前所有修改到本地缓存，**不退出** PDF 编辑模式。
@@ -81,8 +88,12 @@ export class PDFExporter {
   private btnExportSelected: HTMLElement | null = null;
   private btnSelectAll: HTMLElement | null = null;
   private btnSave: HTMLElement | null = null;
+  private btnPsdSelected: HTMLElement | null = null;
+  private btnPsdAll: HTMLElement | null = null;
   private labelCount: HTMLElement | null = null;
   private _saveFeedbackTimer: number | null = null;
+  /** PSD 导出进行中标志，避免重复点击产生并发导出 */
+  private _psdExporting = false;
 
   constructor(callbacks: PDFExporterCallbacks) {
     this.callbacks = callbacks;
@@ -110,6 +121,11 @@ export class PDFExporter {
   /** 获取当前所有覆盖层的自定义字体大小的快照（用于持久化） */
   getCustomFontSizes(): Map<string, number> {
     return new Map(this.customFontSizes);
+  }
+
+  /** 获取当前选中的图片 URL 集合（供 PSD 导出按选中范围过滤） */
+  getSelectedImageSrcs(): Set<string> {
+    return new Set(this.selectedImages);
   }
 
   /** 获取全局背景透明度 */
@@ -237,6 +253,14 @@ export class PDFExporter {
           color: #c0c0d0; border: 1px solid rgba(255,255,255,0.15);
         }
         .ml-pdf-btn-select-all:hover { background: rgba(255,255,255,0.18); }
+        .ml-pdf-btn-psd {
+          background: rgba(49,120,198,0.22);
+          color: #6ab0f3; border: 1px solid rgba(49,120,198,0.45);
+        }
+        .ml-pdf-btn-psd:hover { background: rgba(49,120,198,0.35); }
+        .ml-pdf-btn-psd:disabled {
+          opacity: 0.4; cursor: not-allowed;
+        }
         .ml-pdf-btn-save {
           background: rgba(76,175,80,0.18);
           color: #66d97a; border: 1px solid rgba(76,175,80,0.35);
@@ -265,6 +289,8 @@ export class PDFExporter {
       <button class="ml-pdf-btn ml-pdf-btn-select-all" id="ml-pdf-btn-select-all">⬜ 取消全选</button>
       <span class="ml-pdf-info" id="ml-pdf-toolbar-info">已翻译: 0 | 已选中: 0</span>
       <button class="ml-pdf-btn ml-pdf-btn-save" id="ml-pdf-btn-save">💾 保存</button>
+      <button class="ml-pdf-btn ml-pdf-btn-psd" id="ml-pdf-btn-psd-selected" disabled>🎨 PSD(选中)</button>
+      <button class="ml-pdf-btn ml-pdf-btn-psd" id="ml-pdf-btn-psd-all">🎨 PSD(全部)</button>
       <button class="ml-pdf-btn ml-pdf-btn-exit" id="ml-pdf-btn-exit">❌ 退出</button>
     `;
 
@@ -282,9 +308,55 @@ export class PDFExporter {
     this.btnSelectAll?.addEventListener('click', () => this.toggleSelectAll());
     this.btnSave = toolbar.querySelector('#ml-pdf-btn-save');
     this.btnSave?.addEventListener('click', () => this.handleSaveClick());
+    this.btnPsdSelected = toolbar.querySelector('#ml-pdf-btn-psd-selected');
+    this.btnPsdAll = toolbar.querySelector('#ml-pdf-btn-psd-all');
+    this.btnPsdSelected?.addEventListener('click', () => this.handlePsdExport(true));
+    this.btnPsdAll?.addEventListener('click', () => this.handlePsdExport(false));
     toolbar.querySelector('#ml-pdf-btn-exit')?.addEventListener('click', () => this.callbacks.onExitRequest());
 
     this.updateToolbarCounts();
+  }
+
+  /**
+   * 处理「导出 PSD」按钮点击
+   *
+   * 导出前先静默保存用户编辑 —— PSD 的数据源是本地缓存，
+   * 若用户刚调整过字号/位置/透明度而未保存，直接导出会拿到旧数据。
+   */
+  private async handlePsdExport(selectedOnly: boolean): Promise<void> {
+    if (!this.callbacks.onExportPsd) {
+      alert('PSD 导出未启用');
+      return;
+    }
+    if (this._psdExporting) return;
+
+    // 若有覆盖层处于编辑态，先收敛它，确保其变更写入缓存
+    if (this.editingOverlay) {
+      this.callbacks.onSaveEdits('', []);
+      this.clearEditingState();
+    }
+
+    this._psdExporting = true;
+    const touched = [this.btnPsdSelected, this.btnPsdAll].filter(Boolean) as HTMLElement[];
+    touched.forEach((b) => ((b as HTMLButtonElement).disabled = true));
+
+    try {
+      // 先持久化，保证导出的 PSD 与用户当前所见一致
+      try {
+        await this.callbacks.onAutoSave();
+      } catch (e) {
+        console.warn('[PDFExport] PSD 导出前自动保存失败，继续导出:', e);
+      }
+
+      await this.callbacks.onExportPsd(selectedOnly);
+    } catch (e) {
+      console.error('[PDFExport] PSD 导出失败:', e);
+      alert('PSD 导出失败：' + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      this._psdExporting = false;
+      // 恢复按钮可用性（选中按钮的可用性由 updateToolbarCounts 决定）
+      this.updateToolbarCounts();
+    }
   }
 
   /**
@@ -343,6 +415,9 @@ export class PDFExporter {
     this.btnExportAll = null;
     this.btnExportSelected = null;
     this.btnSelectAll = null;
+    this.btnSave = null;
+    this.btnPsdSelected = null;
+    this.btnPsdAll = null;
     this.labelCount = null;
   }
 
@@ -362,6 +437,14 @@ export class PDFExporter {
 
     if (this.btnExportSelected) {
       (this.btnExportSelected as HTMLButtonElement).disabled = selected === 0;
+    }
+
+    // PSD 导出按钮：无选中/无译文时禁用
+    if (this.btnPsdSelected && !this._psdExporting) {
+      (this.btnPsdSelected as HTMLButtonElement).disabled = selected === 0;
+    }
+    if (this.btnPsdAll && !this._psdExporting) {
+      (this.btnPsdAll as HTMLButtonElement).disabled = translated === 0;
     }
 
     // 全选按钮文字
